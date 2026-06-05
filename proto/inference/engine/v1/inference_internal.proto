@@ -1,0 +1,91 @@
+syntax = "proto3";
+
+package inference.engine.v1;
+
+option go_package = "github.com/mustafacavusoglu/axon/control-plane/enginepb";
+
+service InferenceEngine {
+  rpc BatchInfer(BatchInferRequest)     returns (BatchInferResponse);
+  rpc LoadModel(LoadModelRequest)       returns (LoadModelResponse);
+  rpc UnloadModel(UnloadModelRequest)   returns (UnloadModelResponse);
+  rpc ModelStatus(ModelStatusRequest)   returns (ModelStatusResponse);
+  rpc Healthcheck(HealthRequest)        returns (HealthResponse);
+}
+
+message BatchInferRequest {
+  string model_name       = 1;
+  uint32 version          = 2;
+  repeated InferInput inputs = 3;
+  uint32 batch_size       = 4;
+}
+
+message InferInput {
+  string name        = 1;
+  bytes data         = 2;
+  repeated int64 shape = 3;
+  DataType dtype     = 4;
+}
+
+message BatchInferResponse {
+  repeated InferOutput outputs = 1;
+  double latency_ms           = 2;
+}
+
+message InferOutput {
+  string name        = 1;
+  bytes data         = 2;
+  repeated int64 shape = 3;
+  DataType dtype     = 4;
+}
+
+message LoadModelRequest {
+  string name       = 1;
+  uint32 version    = 2;
+  string model_path = 3;
+}
+
+message LoadModelResponse {
+  bool success = 1;
+  string error = 2;
+}
+
+message UnloadModelRequest {
+  string name    = 1;
+  uint32 version = 2;
+}
+
+message UnloadModelResponse {
+  bool success = 1;
+}
+
+message ModelStatusRequest {
+  string name    = 1;
+  uint32 version = 2;
+}
+
+message ModelStatusResponse {
+  string name       = 1;
+  uint32 version    = 2;
+  string state      = 3;
+  string platform   = 4;
+  uint64 memory_bytes = 5;
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  bool healthy = 1;
+  uint64 uptime_sec = 2;
+}
+
+enum DataType {
+  TYPE_INVALID = 0;
+  TYPE_FP32    = 1;
+  TYPE_FP64    = 2;
+  TYPE_INT32   = 3;
+  TYPE_INT64   = 4;
+  TYPE_INT8    = 5;
+  TYPE_UINT8   = 6;
+  TYPE_BOOL    = 7;
+  TYPE_STRING  = 8;
+}

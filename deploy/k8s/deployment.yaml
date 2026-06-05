@@ -1,0 +1,98 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: inference-server
+  labels:
+    app: inference-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: inference-server
+  template:
+    metadata:
+      labels:
+        app: inference-server
+    spec:
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: DoNotSchedule
+
+      initContainers:
+        - name: model-puller
+          image: busybox:1.36
+          command: ["sh", "-c", "echo 'init: model puller placeholder'"]
+          volumeMounts:
+            - name: models
+              mountPath: /models
+
+      containers:
+        - name: control-plane
+          image: axon/control-plane:latest
+          ports:
+            - containerPort: 8080
+              name: http
+            - containerPort: 8001
+              name: grpc
+          env:
+            - name: INFERENCE_SOCKET
+              value: /run/inference.sock
+            - name: MODEL_REPO_PATH
+              value: /models
+            - name: MAX_MODEL_MEMORY_GB
+              value: "8"
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "512Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2Gi"
+          livenessProbe:
+            httpGet:
+              path: /v2/health/live
+              port: 8080
+            initialDelaySeconds: 10
+            periodSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 5
+          volumeMounts:
+            - name: models
+              mountPath: /models
+            - name: socket-dir
+              mountPath: /run
+
+        - name: inference-engine
+          image: axon/inference-engine:latest
+          env:
+            - name: SOCKET_PATH
+              value: /run/inference.sock
+            - name: NUM_THREADS
+              value: "0"
+            - name: ARENA_SIZE_MB
+              value: "4096"
+          resources:
+            requests:
+              cpu: "4000m"
+              memory: "4Gi"
+            limits:
+              cpu: "16000m"
+              memory: "16Gi"
+          volumeMounts:
+            - name: models
+              mountPath: /models
+              readOnly: true
+            - name: socket-dir
+              mountPath: /run
+
+      volumes:
+        - name: models
+          persistentVolumeClaim:
+            claimName: model-store-pvc
+        - name: socket-dir
+          emptyDir: {}

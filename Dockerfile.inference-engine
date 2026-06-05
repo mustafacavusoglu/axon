@@ -1,0 +1,29 @@
+FROM rust:1.88-slim-bookworm AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY inference-engine/Cargo.toml inference-engine/Cargo.lock* inference-engine/build.rs ./
+RUN mkdir src && echo "fn main() {}" > src/main.rs
+RUN cargo build --release 2>/dev/null || true
+
+COPY inference-engine/src/ ./src/
+COPY proto/ ../proto/
+
+RUN cargo build --release
+
+FROM debian:bookworm-slim
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    libonnxruntime \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/target/release/inference-engine /usr/local/bin/inference-engine
+
+VOLUME ["/models", "/run"]
+
+ENTRYPOINT ["inference-engine"]

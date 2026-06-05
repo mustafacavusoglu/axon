@@ -1,0 +1,38 @@
+version: "3.9"
+
+services:
+  inference-engine:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference-engine
+    volumes:
+      - socket-vol:/run
+      - ${MODEL_REPO_PATH:-./local_models/models}:/models:ro
+    environment:
+      - SOCKET_PATH=/run/inference.sock
+      - NUM_THREADS=0
+      - ARENA_SIZE_MB=4096
+    restart: unless-stopped
+
+  control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile.control-plane
+    ports:
+      - "8080:8080"
+      - "8001:8001"
+    volumes:
+      - socket-vol:/run
+      - ${MODEL_REPO_PATH:-./local_models/models}:/models:ro
+    environment:
+      - INFERENCE_SOCKET=/run/inference.sock
+      - MODEL_REPO_PATH=/models
+      - MAX_MODEL_MEMORY_GB=8
+      - HTTP_PORT=8080
+      - GRPC_PORT=8001
+    depends_on:
+      - inference-engine
+    restart: unless-stopped
+
+volumes:
+  socket-vol:
