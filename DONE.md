@@ -56,3 +56,21 @@
 - [x] `deploy/k8s/deployment.yaml` — Sidecar pod deployment
 - [x] `deploy/k8s/service.yaml` — External + headless service
 - [x] `deploy/k8s/pvc.yaml` — Model store PVC
+
+## Bug Fixes & Hardening
+
+- [x] Config parser: array sözdizimi desteği (multi-input, multi-output)
+- [x] Config parser: brace derinlik takibi, iç içe yapılar için doğru section yönetimi
+- [x] Config parser: `currentSection` boşken section-specific case'lerin önce işlenmesi
+- [x] Config parser: `dynamic_batching` section init (nil check fix)
+- [x] Config parser: `{` aynı satırda section declaration ile gelince brace depth artışı
+- [x] Config parser test: `lgbm_breast_cancer/config.pbtxt` başarıyla parse ediliyor
+- [x] Viper `SetEnvPrefix` + `BindEnv` çakışması → manuel `os.Getenv` ile değiştirildi
+- [x] LifecycleManager'a `repoPath` eklendi (hardcoded `/models` kaldırıldı)
+- [x] Prometheus `MustRegister` duplicate hatası → `promauto` auto-register
+- [x] Rust engine: INT64 output desteği (TensorData enum: F32/I64)
+- [x] Rust engine: output dtype auto-detection (f32 fallback → i64)
+- [x] HTTP handler: JSON `data` array desteği (FP32, INT64, INT32)
+- [x] HTTP response: `data` array formatında çıktı (raw bytes → float64 slice)
+- [x] `run.sh` — Local development script (build + run both services)
+- [x] `control-plane/internal/manager/config_parser_test.go` — Unit test

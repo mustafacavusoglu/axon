@@ -2,6 +2,7 @@ package health
 
 import (
 	"context"
+	"log"
 
 	"github.com/mustafacavusoglu/axon/control-plane/internal/client"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/manager"
@@ -22,8 +23,13 @@ func NewChecker(registry *manager.ModelRegistry, client *client.InferenceClient)
 }
 
 func (c *Checker) IsLive() bool {
-	_, err := c.client.Healthcheck(context.Background())
-	return err == nil
+	resp, err := c.client.Healthcheck(context.Background())
+	if err != nil {
+		log.Printf("healthcheck failed: %v", err)
+		return false
+	}
+	log.Printf("healthcheck OK, uptime=%ds", resp.UptimeSec)
+	return true
 }
 
 func (c *Checker) IsReady() bool {

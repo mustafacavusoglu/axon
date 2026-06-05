@@ -44,8 +44,8 @@ type VersionPolicy struct {
 }
 
 type InstanceGroup struct {
-	Count int32
-	Kind  string
+	Count  int32
+	Kind   string
 	CpuSet string
 }
 
@@ -73,46 +73,50 @@ func ParseModelConfig(content []byte) (*ModelConfig, error) {
 	lines := strings.Split(string(content), "\n")
 
 	var currentSection string
-	for _, line := range lines {
-		line = strings.TrimSpace(line)
+	braceDepth := 0
+
+	for _, rawLine := range lines {
+		line := strings.TrimSpace(rawLine)
 		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+
+		if line == "{" {
+			braceDepth++
+			continue
+		}
+		if line == "}" {
+			braceDepth--
+			if braceDepth == 0 && currentSection != "" {
+				currentSection = ""
+			}
 			continue
 		}
 
 		line = strings.TrimRight(line, "{")
 		line = strings.TrimSpace(line)
 
+		if line == "]" {
+			continue
+		}
+
+		sectionStart := false
+		for _, prefix := range []string{"input", "output", "instance_group", "dynamic_batching", "version_policy"} {
+			if strings.HasPrefix(line, prefix) && (len(line) == len(prefix) || line[len(prefix)] == ' ' || line[len(prefix)] == '[') {
+				currentSection = prefix
+				braceDepth = 0
+				sectionStart = true
+				break
+			}
+		}
+		if sectionStart {
+			if strings.Contains(rawLine, "{") {
+				braceDepth++
+			}
+			continue
+		}
+
 		switch {
-		case strings.HasPrefix(line, "name:"):
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				cfg.Name = strings.Trim(strings.TrimSpace(parts[1]), "\"")
-			}
-
-		case strings.HasPrefix(line, "platform:"):
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				cfg.Platform = strings.Trim(strings.TrimSpace(parts[1]), "\"")
-			}
-
-		case strings.HasPrefix(line, "max_batch_size:"):
-			parts := strings.SplitN(line, ":", 2)
-			if len(parts) == 2 {
-				v, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 32)
-				cfg.MaxBatchSize = int32(v)
-			}
-
-		case strings.HasPrefix(line, "input"):
-			currentSection = "input"
-		case strings.HasPrefix(line, "output"):
-			currentSection = "output"
-		case strings.HasPrefix(line, "instance_group"):
-			currentSection = "instance_group"
-		case strings.HasPrefix(line, "dynamic_batching"):
-			currentSection = "dynamic_batching"
-		case strings.HasPrefix(line, "version_policy"):
-			currentSection = "version_policy"
-
 		case currentSection == "input" && strings.HasPrefix(line, "name:"):
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
@@ -177,7 +181,9 @@ func ParseModelConfig(content []byte) (*ModelConfig, error) {
 		case currentSection == "dynamic_batching" && strings.HasPrefix(line, "preferred_batch_size:"):
 			parts := strings.SplitN(line, ":", 2)
 			if len(parts) == 2 {
-				cfg.DynamicBatching = &DynamicBatching{}
+				if cfg.DynamicBatching == nil {
+					cfg.DynamicBatching = &DynamicBatching{}
+				}
 				nums := parseNumList(parts[1])
 				for _, n := range nums {
 					cfg.DynamicBatching.PreferredBatchSize = append(cfg.DynamicBatching.PreferredBatchSize, int32(n))
@@ -186,7 +192,10 @@ func ParseModelConfig(content []byte) (*ModelConfig, error) {
 
 		case currentSection == "dynamic_batching" && strings.HasPrefix(line, "max_queue_delay_microseconds:"):
 			parts := strings.SplitN(line, ":", 2)
-			if cfg.DynamicBatching != nil && len(parts) == 2 {
+			if len(parts) == 2 {
+				if cfg.DynamicBatching == nil {
+					cfg.DynamicBatching = &DynamicBatching{}
+				}
 				v, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 64)
 				cfg.DynamicBatching.MaxQueueDelayUs = v
 			}
@@ -202,8 +211,24 @@ func ParseModelConfig(content []byte) (*ModelConfig, error) {
 				cfg.VersionPolicy.NumVersions = int32(v)
 			}
 
-		case strings.HasPrefix(line, "}"):
-			currentSection = ""
+		case currentSection == "" && strings.HasPrefix(line, "name:"):
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				cfg.Name = strings.Trim(strings.TrimSpace(parts[1]), "\"")
+			}
+
+		case currentSection == "" && strings.HasPrefix(line, "platform:"):
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				cfg.Platform = strings.Trim(strings.TrimSpace(parts[1]), "\"")
+			}
+
+		case currentSection == "" && strings.HasPrefix(line, "max_batch_size:"):
+			parts := strings.SplitN(line, ":", 2)
+			if len(parts) == 2 {
+				v, _ := strconv.ParseInt(strings.TrimSpace(parts[1]), 10, 32)
+				cfg.MaxBatchSize = int32(v)
+			}
 		}
 	}
 

@@ -1,0 +1,82 @@
+# Triton Inference Server model configuration
+# Auto-generated — model: lgbm_breast_cancer
+
+name: "lgbm_breast_cancer"
+platform: "onnxruntime_onnx"
+
+max_batch_size: 32
+
+# ── Input schema ───────────────────────────────────────
+# The ONNX model expects a single tensor "input" with all
+# features concatenated in the exact order below:
+#
+# │  col │ name                      │ dtype     │
+# ├──────┼────────────────────────┼───────────┤
+# │    0 │ feature_0              │ TYPE_FP32 │
+# │    1 │ feature_1              │ TYPE_FP32 │
+# │    2 │ feature_2              │ TYPE_FP32 │
+# │    3 │ feature_3              │ TYPE_FP32 │
+# │    4 │ feature_4              │ TYPE_FP32 │
+# │    5 │ feature_5              │ TYPE_FP32 │
+# │    6 │ feature_6              │ TYPE_FP32 │
+# │    7 │ feature_7              │ TYPE_FP32 │
+# │    8 │ feature_8              │ TYPE_FP32 │
+# │    9 │ feature_9              │ TYPE_FP32 │
+# │   10 │ feature_10             │ TYPE_FP32 │
+# │   11 │ feature_11             │ TYPE_FP32 │
+# │   12 │ feature_12             │ TYPE_FP32 │
+# │   13 │ feature_13             │ TYPE_FP32 │
+# │   14 │ feature_14             │ TYPE_FP32 │
+# │   15 │ feature_15             │ TYPE_FP32 │
+# │   16 │ feature_16             │ TYPE_FP32 │
+# │   17 │ feature_17             │ TYPE_FP32 │
+# │   18 │ feature_18             │ TYPE_FP32 │
+# │   19 │ feature_19             │ TYPE_FP32 │
+# │   20 │ feature_20             │ TYPE_FP32 │
+# │   21 │ feature_21             │ TYPE_FP32 │
+# │   22 │ feature_22             │ TYPE_FP32 │
+# │   23 │ feature_23             │ TYPE_FP32 │
+# │   24 │ feature_24             │ TYPE_FP32 │
+# │   25 │ feature_25             │ TYPE_FP32 │
+# │   26 │ feature_26             │ TYPE_FP32 │
+# │   27 │ feature_27             │ TYPE_FP32 │
+# │   28 │ feature_28             │ TYPE_FP32 │
+# │   29 │ feature_29             │ TYPE_FP32 │
+#
+#   Total: 30 features, passed as a flat float32 array shape [1, 30]
+
+# ── Input ──────────────────────────────────────────────
+input [
+    {
+      name: "input"
+      data_type: TYPE_FP32
+      dims: [ 30 ]
+    }
+]
+
+# ── Output ─────────────────────────────────────────────
+output [
+    {
+      name: "output_label"
+      data_type: TYPE_INT64
+      dims: [ 1 ]
+    },
+    {
+      name: "output_probability"
+      data_type: TYPE_FP32
+      dims: [ 2 ]
+    }
+]
+
+# ── Dynamic batching ───────────────────────────────────
+dynamic_batching {
+  max_queue_delay_microseconds: 100
+}
+
+# ── Instance group (CPU-only) ──────────────────────────
+instance_group [
+  {
+    count: 2
+    kind: KIND_CPU
+  }
+]

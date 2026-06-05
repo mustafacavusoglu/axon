@@ -1,51 +1,54 @@
 package config
 
 import (
+	"os"
+	"strconv"
 	"time"
-
-	"github.com/spf13/viper"
 )
 
 type Config struct {
-	HTTPPort       int           `mapstructure:"http_port"`
-	GRPCPort       int           `mapstructure:"grpc_port"`
-	InferenceSocket string       `mapstructure:"inference_socket"`
-	ModelRepoPath  string        `mapstructure:"model_repo_path"`
-	MaxModelMemory int64         `mapstructure:"max_model_memory_bytes"`
-	DrainTimeout   time.Duration `mapstructure:"drain_timeout"`
-	LogLevel       string        `mapstructure:"log_level"`
+	HTTPPort        int           `json:"http_port"`
+	GRPCPort        int           `json:"grpc_port"`
+	InferenceSocket string        `json:"inference_socket"`
+	ModelRepoPath   string        `json:"model_repo_path"`
+	MaxModelMemory  int64         `json:"max_model_memory_bytes"`
+	DrainTimeout    time.Duration `json:"drain_timeout"`
+	LogLevel        string        `json:"log_level"`
 }
 
 func Load() (*Config, error) {
-	v := viper.New()
-
-	v.SetDefault("http_port", 8080)
-	v.SetDefault("grpc_port", 8001)
-	v.SetDefault("inference_socket", "/run/inference.sock")
-	v.SetDefault("model_repo_path", "/models")
-	v.SetDefault("max_model_memory_bytes", 8*1024*1024*1024)
-	v.SetDefault("drain_timeout", 30*time.Second)
-	v.SetDefault("log_level", "info")
-
-	v.SetConfigName("config")
-	v.SetConfigType("yaml")
-	v.AddConfigPath(".")
-
-	v.AutomaticEnv()
-	v.SetEnvPrefix("AXON")
-	v.BindEnv("inference_socket", "INFERENCE_SOCKET")
-	v.BindEnv("model_repo_path", "MODEL_REPO_PATH")
-	v.BindEnv("max_model_memory_bytes", "MAX_MODEL_MEMORY_GB")
-	v.BindEnv("http_port", "HTTP_PORT")
-	v.BindEnv("grpc_port", "GRPC_PORT")
-	v.BindEnv("drain_timeout", "DRAIN_TIMEOUT")
-
-	_ = v.ReadInConfig()
-
-	var cfg Config
-	if err := v.Unmarshal(&cfg); err != nil {
-		return nil, err
+	cfg := &Config{
+		HTTPPort:        8080,
+		GRPCPort:        8001,
+		InferenceSocket: "/run/inference.sock",
+		ModelRepoPath:   "/models",
+		MaxModelMemory:  8 * 1024 * 1024 * 1024,
+		DrainTimeout:    30 * time.Second,
+		LogLevel:        "info",
 	}
 
-	return &cfg, nil
+	if v := os.Getenv("HTTP_PORT"); v != "" {
+		cfg.HTTPPort, _ = strconv.Atoi(v)
+	}
+	if v := os.Getenv("GRPC_PORT"); v != "" {
+		cfg.GRPCPort, _ = strconv.Atoi(v)
+	}
+	if v := os.Getenv("INFERENCE_SOCKET"); v != "" {
+		cfg.InferenceSocket = v
+	}
+	if v := os.Getenv("MODEL_REPO_PATH"); v != "" {
+		cfg.ModelRepoPath = v
+	}
+	if v := os.Getenv("MAX_MODEL_MEMORY_GB"); v != "" {
+		gb, _ := strconv.ParseInt(v, 10, 64)
+		cfg.MaxModelMemory = gb * 1024 * 1024 * 1024
+	}
+	if v := os.Getenv("DRAIN_TIMEOUT"); v != "" {
+		d, _ := time.ParseDuration(v)
+		if d > 0 {
+			cfg.DrainTimeout = d
+		}
+	}
+
+	return cfg, nil
 }

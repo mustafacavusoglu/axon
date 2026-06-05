@@ -13,12 +13,14 @@ import (
 type LifecycleManager struct {
 	registry *ModelRegistry
 	client   *client.InferenceClient
+	repoPath string
 }
 
-func NewLifecycleManager(registry *ModelRegistry, client *client.InferenceClient) *LifecycleManager {
+func NewLifecycleManager(registry *ModelRegistry, client *client.InferenceClient, repoPath string) *LifecycleManager {
 	return &LifecycleManager{
 		registry: registry,
 		client:   client,
+		repoPath: repoPath,
 	}
 }
 
@@ -104,12 +106,12 @@ func (m *LifecycleManager) LoadAllFromRepo(repoPath string) error {
 }
 
 func (m *LifecycleManager) resolveModelPath(name string, version int) string {
-	base := filepath.Join("/models", name, strconv.Itoa(version), "model.onnx")
+	base := filepath.Join(m.repoPath, name, strconv.Itoa(version), "model.onnx")
 	if _, err := os.Stat(base); err == nil {
 		return base
 	}
 
-	entries, err := filepath.Glob(filepath.Join("/models", name, strconv.Itoa(version), "*.onnx"))
+	entries, err := filepath.Glob(filepath.Join(m.repoPath, name, strconv.Itoa(version), "*.onnx"))
 	if err == nil && len(entries) > 0 {
 		return entries[0]
 	}

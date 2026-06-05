@@ -7,7 +7,7 @@ services:
       dockerfile: Dockerfile.inference-engine
     volumes:
       - socket-vol:/run
-      - ${MODEL_REPO_PATH:-./local_models/models}:/models:ro
+      - ${MODEL_REPO_PATH:-./local_models/model_repository}:/models:ro
     environment:
       - SOCKET_PATH=/run/inference.sock
       - NUM_THREADS=0
@@ -23,7 +23,7 @@ services:
       - "8001:8001"
     volumes:
       - socket-vol:/run
-      - ${MODEL_REPO_PATH:-./local_models/models}:/models:ro
+      - ${MODEL_REPO_PATH:-./local_models/model_repository}:/models:ro
     environment:
       - INFERENCE_SOCKET=/run/inference.sock
       - MODEL_REPO_PATH=/models

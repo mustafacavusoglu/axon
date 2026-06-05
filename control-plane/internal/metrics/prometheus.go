@@ -46,13 +46,5 @@ var (
 )
 
 func Init() {
-	prometheus.MustRegister(
-		InferenceRequests,
-		InferenceLatency,
-		InferenceQueueDepth,
-		ModelLoadEvents,
-		EngineLatency,
-		BatchSize,
-		ActiveModels,
-	)
+	// prometheus collectors are auto-registered via promauto
 }

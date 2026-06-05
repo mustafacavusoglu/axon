@@ -39,7 +39,7 @@ func main() {
 	defer engineClient.Close()
 
 	registry := manager.NewModelRegistry()
-	lifecycle := manager.NewLifecycleManager(registry, engineClient)
+	lifecycle := manager.NewLifecycleManager(registry, engineClient, cfg.ModelRepoPath)
 	checker := health.NewChecker(registry, engineClient)
 
 	if err := lifecycle.LoadAllFromRepo(cfg.ModelRepoPath); err != nil {

@@ -1,14 +1,15 @@
 package http
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	enginev1 "github.com/mustafacavusoglu/axon/control-plane/inference/engine/v1"
-	"github.com/mustafacavusoglu/axon/control-plane/inference/kfs"
 
 	"github.com/mustafacavusoglu/axon/control-plane/internal/client"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/health"
@@ -162,7 +163,7 @@ func (h *Handler) UnloadModel(c *fiber.Ctx) error {
 func (h *Handler) Infer(c *fiber.Ctx) error {
 	name := c.Params("name")
 
-	var req kfs.ModelInferRequest
+	var req inferRequest
 	if err := json.Unmarshal(c.Body(), &req); err != nil {
 		return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
 			"error": fmt.Sprintf("invalid request body: %v", err),
@@ -187,12 +188,10 @@ func (h *Handler) Infer(c *fiber.Ctx) error {
 
 	var internalInputs []*enginev1.InferInput
 	for _, inp := range req.Inputs {
-		var rawBytes []byte
-		if inp.RawData != nil {
-			rawBytes = inp.RawData
-		} else {
+		rawBytes, err := inp.dataToBytes()
+		if err != nil {
 			return c.Status(fiber.StatusBadRequest).JSON(fiber.Map{
-				"error": fmt.Sprintf("input %s must use raw_data (binary encoding)", inp.Name),
+				"error": fmt.Sprintf("input %s: %v", inp.Name, err),
 			})
 		}
 
@@ -220,24 +219,114 @@ func (h *Handler) Infer(c *fiber.Ctx) error {
 	metrics.InferenceLatency.WithLabelValues(name, strconv.Itoa(version)).Observe(float64(elapsed))
 	metrics.EngineLatency.WithLabelValues(name, strconv.Itoa(version)).Observe(resp.LatencyMs)
 
-	var outputs []*kfs.InferOutput
-	for _, out := range resp.Outputs {
-		outputs = append(outputs, &kfs.InferOutput{
-			Name:     out.Name,
-			Shape:    out.Shape,
-			Datatype: internalDtypeToString(enginev1.DataType(out.Dtype)),
-			RawData:  out.Data,
-		})
-	}
-
 	modelVersionStr := strconv.Itoa(version)
-
-	return c.JSON(kfs.ModelInferResponse{
+	return c.JSON(inferResponse{
 		Id:           req.Id,
 		ModelName:    name,
 		ModelVersion: modelVersionStr,
-		Outputs:      outputs,
+		Outputs:      buildOutputs(resp.Outputs),
 	})
+}
+
+type inferRequest struct {
+	Id           string        `json:"id"`
+	ModelVersion string        `json:"model_version"`
+	Inputs       []inferInput  `json:"inputs"`
+}
+
+type inferInput struct {
+	Name     string    `json:"name"`
+	Shape    []int64   `json:"shape"`
+	Datatype string    `json:"datatype"`
+	Data     []float64 `json:"data"`
+	RawData  []byte    `json:"raw_data"`
+}
+
+func (inp *inferInput) dataToBytes() ([]byte, error) {
+	if len(inp.RawData) > 0 {
+		return inp.RawData, nil
+	}
+	if len(inp.Data) > 0 {
+		switch inp.Datatype {
+		case "FP32":
+			bytes := make([]byte, len(inp.Data)*4)
+			for i, v := range inp.Data {
+				bits := math.Float32bits(float32(v))
+				binary.LittleEndian.PutUint32(bytes[i*4:], bits)
+			}
+			return bytes, nil
+		case "INT64":
+			bytes := make([]byte, len(inp.Data)*8)
+			for i, v := range inp.Data {
+				binary.LittleEndian.PutUint64(bytes[i*8:], uint64(int64(v)))
+			}
+			return bytes, nil
+		case "INT32":
+			bytes := make([]byte, len(inp.Data)*4)
+			for i, v := range inp.Data {
+				binary.LittleEndian.PutUint32(bytes[i*4:], uint32(int32(v)))
+			}
+			return bytes, nil
+		default:
+			return nil, fmt.Errorf("unsupported dtype %s for JSON data", inp.Datatype)
+		}
+	}
+	return nil, fmt.Errorf("no data provided")
+}
+
+type inferResponse struct {
+	Id           string         `json:"id"`
+	ModelName    string         `json:"model_name"`
+	ModelVersion string         `json:"model_version"`
+	Outputs      []inferOutput  `json:"outputs"`
+}
+
+type inferOutput struct {
+	Name     string  `json:"name"`
+	Shape    []int64 `json:"shape"`
+	Datatype string  `json:"datatype"`
+	Data     []float64 `json:"data"`
+}
+
+func buildOutputs(outputs []*enginev1.InferOutput) []inferOutput {
+	var result []inferOutput
+	for _, out := range outputs {
+		o := inferOutput{
+			Name:  out.Name,
+			Shape: out.Shape,
+		}
+		dt := internalDtypeToString(enginev1.DataType(out.Dtype))
+		o.Datatype = dt
+
+		switch {
+		case dt == "FP32" && len(out.Data) >= 4:
+			n := len(out.Data) / 4
+			o.Data = make([]float64, n)
+			for i := 0; i < n; i++ {
+				bits := binary.LittleEndian.Uint32(out.Data[i*4 : i*4+4])
+				o.Data[i] = float64(math.Float32frombits(bits))
+			}
+
+		case dt == "INT64" && len(out.Data) >= 8:
+			n := len(out.Data) / 8
+			o.Data = make([]float64, n)
+			for i := 0; i < n; i++ {
+				val := binary.LittleEndian.Uint64(out.Data[i*8 : i*8+8])
+				o.Data[i] = float64(int64(val))
+			}
+
+		case dt == "INT32" && len(out.Data) >= 4:
+			n := len(out.Data) / 4
+			o.Data = make([]float64, n)
+			for i := 0; i < n; i++ {
+				val := binary.LittleEndian.Uint32(out.Data[i*4 : i*4+4])
+				o.Data[i] = float64(int32(val))
+			}
+		}
+
+		result = append(result, o)
+	}
+	return result
 }
 
 func dtypeToInternal(dt string) enginev1.DataType {

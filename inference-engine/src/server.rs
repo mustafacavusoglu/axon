@@ -5,6 +5,7 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
+use crate::session::runner::TensorData;
 use crate::arena::TensorArena;
 use crate::metrics;
 use crate::session::pool::SessionPool;
@@ -99,18 +100,17 @@ impl InferenceEngine for InferenceEngineImpl {
 
         let response_outputs: Vec<InferOutput> = outputs
             .into_iter()
-            .map(|(name, array)| {
-                let shape: Vec<i64> = array.shape().iter().map(|&d| d as i64).collect();
-                let data: Vec<f32> = array.iter().copied().collect();
-                let bytes: Vec<u8> = data
-                    .into_iter()
-                    .flat_map(|f| f.to_le_bytes().to_vec())
-                    .collect();
+            .map(|(name, shape, tensor_data)| {
+                let bytes = tensor_data.to_bytes();
+                let dtype = match tensor_data {
+                    TensorData::F32(_) => engine::DataType::TypeFp32,
+                    TensorData::I64(_) => engine::DataType::TypeInt64,
+                };
                 InferOutput {
                     name,
                     shape,
                     data: bytes,
-                    dtype: engine::DataType::TypeFp32.into(),
+                    dtype: dtype.into(),
                 }
             })
             .collect();
