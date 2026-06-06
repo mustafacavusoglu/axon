@@ -27,6 +27,8 @@ echo ""
 echo "=== Starting inference engine ==="
 rm -f "$SOCKET"
 cd "$SCRIPT_DIR/inference-engine"
+
+export DYLD_LIBRARY_PATH="/opt/homebrew/lib:${DYLD_LIBRARY_PATH:-}"
 SOCKET_PATH="$SOCKET" NUM_THREADS=4 RUST_LOG=info ./target/debug/inference-engine &
 ENGINE_PID=$!
 sleep 2
