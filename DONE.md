@@ -77,10 +77,11 @@
 - [x] `ort` v2.0.0-rc.12 patch: Map type `todo!()` → `Err(...)` (ONNX model load crash fix)
 - [x] `run.sh` — Local development script (build + run both services)
 - [x] `control-plane/internal/manager/config_parser_test.go` — Unit test
+- [x] Tree-based model Sequence<Map> extraction (LightGBM, XGBoost, sklearn RandomForest)
 - [x] `inference-engine/src/session/runner.rs` — ONNX model load test
+- [x] Integration test: 4/5 models working end-to-end
 
 ## Known Limitations
 
-- **Tree-based classification modeller (LightGBM, XGBoost, CatBoost, RF)**: `ort` v2.0.0-rc.12 Sequence<Map> output desteklemiyor. Modellerin `ZipMap=False` opsiyonuyla re-export edilmesi gerekiyor.
+- **CatBoost model**: input adı `features` olarak export edilmiş, config.pbtxt'de `input` yazıyor. Re-export veya config fix gerekiyor.
 - **`ort` v2.0.0-rc.12**: Map type için `todo!()` panic'i manuel patch ile fix edildi (bkz. `cargo clean` sonrası rebuild).
-- **Regression modelleri** (skl_gradient_boosting_california_housing): Tam çalışıyor, tensor output → 2.6729 tahmini doğrulandı.
