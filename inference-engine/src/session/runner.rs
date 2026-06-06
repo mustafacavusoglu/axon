@@ -2,12 +2,19 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Mutex;
 
-use ndarray::ArrayD;
 use ort::session::{builder::GraphOptimizationLevel, Session};
-use ort::value::Value;
+use ort::value::{Tensor, Value};
+
+pub enum InputTensor {
+    F32(Vec<f32>, Vec<usize>),
+    I32(Vec<i32>, Vec<usize>),
+    I64(Vec<i64>, Vec<usize>),
+    String(Vec<String>, Vec<usize>),
+}
 
 pub enum TensorData {
     F32(Vec<f32>),
+    I32(Vec<i32>),
     I64(Vec<i64>),
 }
 
@@ -15,6 +22,7 @@ impl TensorData {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
             TensorData::F32(data) => data.iter().flat_map(|f| f.to_le_bytes().to_vec()).collect(),
+            TensorData::I32(data) => data.iter().flat_map(|i| i.to_le_bytes().to_vec()).collect(),
             TensorData::I64(data) => data.iter().flat_map(|i| i.to_le_bytes().to_vec()).collect(),
         }
     }
@@ -55,20 +63,47 @@ impl ModelRunner {
 
     pub fn run(
         &self,
-        inputs: Vec<(String, ArrayD<f32>)>,
+        inputs: Vec<(String, InputTensor)>,
     ) -> anyhow::Result<Vec<(String, Vec<i64>, TensorData)>> {
         let mut session_inputs: HashMap<String, Value> = HashMap::new();
 
-        for (name, array) in &inputs {
-            let shape: Vec<usize> = array.shape().to_vec();
-            let data: Vec<f32> = array.iter().copied().collect();
-            let tensor = ndarray::ArrayD::<f32>::from_shape_vec(
-                ndarray::IxDyn(&shape),
-                data,
-            )?;
-            let value = Value::from_array(tensor)
-                .map_err(|e| anyhow::anyhow!("failed to create ort value for '{}': {}", name, e))?;
-            session_inputs.insert(name.clone(), value.into());
+        for (name, tensor) in &inputs {
+            let value = match tensor {
+                InputTensor::F32(data, shape) => {
+                    let array = ndarray::ArrayD::<f32>::from_shape_vec(
+                        ndarray::IxDyn(shape), data.clone(),
+                    )?;
+                    Value::from_array(array)
+                        .map_err(|e| anyhow::anyhow!("fp32 input '{}': {}", name, e))?
+                        .into()
+                }
+                InputTensor::I32(data, shape) => {
+                    let array = ndarray::ArrayD::<i32>::from_shape_vec(
+                        ndarray::IxDyn(shape), data.clone(),
+                    )?;
+                    Value::from_array(array)
+                        .map_err(|e| anyhow::anyhow!("int32 input '{}': {}", name, e))?
+                        .into()
+                }
+                InputTensor::I64(data, shape) => {
+                    let array = ndarray::ArrayD::<i64>::from_shape_vec(
+                        ndarray::IxDyn(shape), data.clone(),
+                    )?;
+                    Value::from_array(array)
+                        .map_err(|e| anyhow::anyhow!("int64 input '{}': {}", name, e))?
+                        .into()
+                }
+                InputTensor::String(data, shape) => {
+                    let array = ndarray::ArrayD::<String>::from_shape_vec(
+                        ndarray::IxDyn(shape), data.clone(),
+                    )?;
+                    let string_tensor: Value = Tensor::from_string_array(&array)
+                        .map_err(|e| anyhow::anyhow!("string input '{}': {}", name, e))?
+                        .into();
+                    string_tensor
+                }
+            };
+            session_inputs.insert(name.clone(), value);
         }
 
         let mut session = self.session.lock().unwrap();
@@ -90,6 +125,7 @@ impl ModelRunner {
 fn extract_output(name: &str, value: &ort::value::ValueRef<'_>) -> anyhow::Result<(Vec<i64>, TensorData)> {
     let f32_res = value.try_extract_tensor::<f32>();
     let i64_res = value.try_extract_tensor::<i64>();
+    let i32_res = value.try_extract_tensor::<i32>();
 
     if let Ok((shape, data)) = f32_res {
         let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
@@ -99,17 +135,19 @@ fn extract_output(name: &str, value: &ort::value::ValueRef<'_>) -> anyhow::Resul
         let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
         return Ok((shape_i64, TensorData::I64(data.to_vec())));
     }
+    if let Ok((shape, data)) = i32_res {
+        let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+        return Ok((shape_i64, TensorData::I32(data.to_vec())));
+    }
 
-    let err_str = format!("{}", f32_res.err().unwrap());
+    let err_str = f32_res.err().map(|e| format!("{}", e)).unwrap_or_default();
     if err_str.contains("Sequence") {
         return extract_tree_sequence(name, value);
     }
 
     Err(anyhow::anyhow!(
-        "failed to extract tensor for '{}': f32={}, i64={}",
-        name,
-        err_str,
-        i64_res.err().map(|e| format!("{}", e)).unwrap_or_default()
+        "failed to extract tensor for '{}': f32={}",
+        name, err_str
     ))
 }
 

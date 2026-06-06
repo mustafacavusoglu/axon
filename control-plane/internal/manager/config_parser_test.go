@@ -70,3 +70,54 @@ func TestParseLgbmBreastCancerConfig(t *testing.T) {
 		t.Errorf("max_queue_delay = %d, want 100", cfg.DynamicBatching.MaxQueueDelayUs)
 	}
 }
+
+func TestParseMultiInputConfig(t *testing.T) {
+	data, err := os.ReadFile("../../../local_models/model_repository/multi_input_example/config.pbtxt")
+	if err != nil {
+		t.Skipf("config.pbtxt not found: %v", err)
+	}
+
+	cfg, err := ParseModelConfig(data)
+	if err != nil {
+		t.Fatalf("ParseModelConfig failed: %v", err)
+	}
+
+	if cfg.Name != "multi_input_example" {
+		t.Errorf("name = %q, want %q", cfg.Name, "multi_input_example")
+	}
+	if cfg.MaxBatchSize != 8 {
+		t.Errorf("max_batch_size = %d, want 8", cfg.MaxBatchSize)
+	}
+	if len(cfg.Inputs) != 5 {
+		t.Fatalf("inputs count = %d, want 5", len(cfg.Inputs))
+	}
+
+	expected := []struct {
+		name string
+		dt   DataType
+	}{
+		{"customer_age", DTINT32},
+		{"account_balance", DTFP32},
+		{"credit_score", DTINT32},
+		{"is_active_member", DTINT32},
+		{"customer_country", DTSTRING},
+	}
+	for i, exp := range expected {
+		if cfg.Inputs[i].Name != exp.name {
+			t.Errorf("input[%d] name = %q, want %q", i, cfg.Inputs[i].Name, exp.name)
+		}
+		if cfg.Inputs[i].DataType != exp.dt {
+			t.Errorf("input[%d] dtype = %d, want %d", i, cfg.Inputs[i].DataType, exp.dt)
+		}
+	}
+
+	if len(cfg.Outputs) != 1 {
+		t.Fatalf("outputs count = %d, want 1", len(cfg.Outputs))
+	}
+	if cfg.Outputs[0].Name != "prediction_probabilities" {
+		t.Errorf("output name = %q", cfg.Outputs[0].Name)
+	}
+	if len(cfg.Outputs[0].Dims) != 1 || cfg.Outputs[0].Dims[0] != 2 {
+		t.Errorf("output dims = %v, want [2]", cfg.Outputs[0].Dims)
+	}
+}

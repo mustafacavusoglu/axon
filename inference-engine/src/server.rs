@@ -5,7 +5,7 @@ use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
-use crate::session::runner::TensorData;
+use crate::session::runner::{InputTensor, TensorData};
 use crate::arena::TensorArena;
 use crate::metrics;
 use crate::session::pool::SessionPool;
@@ -48,38 +48,42 @@ impl InferenceEngine for InferenceEngineImpl {
             tonic::Status::not_found(format!("model not found: {}", e))
         })?;
 
-        let inputs: Vec<(String, ndarray::ArrayD<f32>)> = req
+        let inputs: Vec<(String, InputTensor)> = req
             .inputs
             .iter()
             .map(|inp| {
-                let dtype = inp.dtype();
-                match engine::DataType::try_from(dtype).unwrap_or(engine::DataType::TypeInvalid) {
+                let shape: Vec<usize> = inp.shape.iter().map(|&d| d as usize).collect();
+                let dtype = engine::DataType::try_from(inp.dtype()).unwrap_or(engine::DataType::TypeInvalid);
+
+                match dtype {
                     engine::DataType::TypeFp32 => {
-                        let elem_count = inp.data.len() / 4;
-                        let mut floats = Vec::with_capacity(elem_count);
-                        for chunk in inp.data.chunks_exact(4) {
-                            floats.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
-                        }
-                        let shape: Vec<usize> = inp.shape.iter().map(|&d| d as usize).collect();
-                        let total: usize = shape.iter().product();
-                        if total != floats.len() {
-                            return Err(tonic::Status::invalid_argument(format!(
-                                "shape product {} != data len {} for input {}",
-                                total,
-                                floats.len(),
-                                inp.name
-                            )));
-                        }
-                        let array = ndarray::ArrayD::from_shape_vec(
-                            ndarray::IxDyn(&shape),
-                            floats,
-                        )
-                        .map_err(|e| tonic::Status::invalid_argument(format!("shape error: {}", e)))?;
-                        Ok((inp.name.clone(), array))
+                        let floats = parse_f32(&inp.data, &shape, &inp.name)?;
+                        Ok((inp.name.clone(), InputTensor::F32(floats, shape)))
                     }
-                    other => Err(tonic::Status::invalid_argument(format!(
-                        "unsupported dtype {:?}",
-                        other
+                    engine::DataType::TypeInt32 => {
+                        let ints = parse_i32(&inp.data, &shape, &inp.name)?;
+                        Ok((inp.name.clone(), InputTensor::I32(ints, shape)))
+                    }
+                    engine::DataType::TypeInt64 => {
+                        let ints = parse_i64(&inp.data, &shape, &inp.name)?;
+                        Ok((inp.name.clone(), InputTensor::I64(ints, shape)))
+                    }
+                    engine::DataType::TypeString => {
+                        if shape.len() == 1 && shape[0] == 1 {
+                            let s = String::from_utf8(inp.data.clone())
+                                .map_err(|e| tonic::Status::invalid_argument(format!(
+                                    "invalid utf8 string for '{}': {}", inp.name, e
+                                )))?;
+                            Ok((inp.name.clone(), InputTensor::String(vec![s], shape)))
+                        } else {
+                            Err(tonic::Status::invalid_argument(format!(
+                                "multi-element string tensor not yet supported for '{}'", inp.name
+                            )))
+                        }
+                    }
+                    _ => Err(tonic::Status::invalid_argument(format!(
+                        "unsupported dtype {:?} for input '{}'",
+                        dtype, inp.name
                     ))),
                 }
             })
@@ -104,6 +108,7 @@ impl InferenceEngine for InferenceEngineImpl {
                 let bytes = tensor_data.to_bytes();
                 let dtype = match tensor_data {
                     TensorData::F32(_) => engine::DataType::TypeFp32,
+                    TensorData::I32(_) => engine::DataType::TypeInt32,
                     TensorData::I64(_) => engine::DataType::TypeInt64,
                 };
                 InferOutput {
@@ -191,6 +196,57 @@ impl InferenceEngine for InferenceEngineImpl {
             uptime_sec: self.start_time.elapsed().as_secs(),
         }))
     }
+}
+
+fn parse_f32(data: &[u8], shape: &[usize], name: &str) -> Result<Vec<f32>, tonic::Status> {
+    let elem_count = data.len() / 4;
+    let total: usize = shape.iter().product();
+    if total != elem_count {
+        return Err(tonic::Status::invalid_argument(format!(
+            "shape product {} != data elements {} for {}",
+            total, elem_count, name
+        )));
+    }
+    let mut result = Vec::with_capacity(elem_count);
+    for chunk in data.chunks_exact(4) {
+        result.push(f32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(result)
+}
+
+fn parse_i32(data: &[u8], shape: &[usize], name: &str) -> Result<Vec<i32>, tonic::Status> {
+    let elem_count = data.len() / 4;
+    let total: usize = shape.iter().product();
+    if total != elem_count {
+        return Err(tonic::Status::invalid_argument(format!(
+            "shape product {} != data elements {} for {}",
+            total, elem_count, name
+        )));
+    }
+    let mut result = Vec::with_capacity(elem_count);
+    for chunk in data.chunks_exact(4) {
+        result.push(i32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]));
+    }
+    Ok(result)
+}
+
+fn parse_i64(data: &[u8], shape: &[usize], name: &str) -> Result<Vec<i64>, tonic::Status> {
+    let elem_count = data.len() / 8;
+    let total: usize = shape.iter().product();
+    if total != elem_count {
+        return Err(tonic::Status::invalid_argument(format!(
+            "shape product {} != data elements {} for {}",
+            total, elem_count, name
+        )));
+    }
+    let mut result = Vec::with_capacity(elem_count);
+    for chunk in data.chunks_exact(8) {
+        result.push(i64::from_le_bytes([
+            chunk[0], chunk[1], chunk[2], chunk[3],
+            chunk[4], chunk[5], chunk[6], chunk[7],
+        ]));
+    }
+    Ok(result)
 }
 
 pub async fn serve(
