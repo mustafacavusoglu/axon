@@ -18,13 +18,6 @@ impl TensorData {
             TensorData::I64(data) => data.iter().flat_map(|i| i.to_le_bytes().to_vec()).collect(),
         }
     }
-
-    pub fn dtype_str(&self) -> &str {
-        match self {
-            TensorData::F32(_) => "FP32",
-            TensorData::I64(_) => "INT64",
-        }
-    }
 }
 
 pub struct ModelRunner {
@@ -84,35 +77,78 @@ impl ModelRunner {
 
         let mut results = Vec::new();
         for (name, value) in outputs.iter() {
-            let f32_result = value.try_extract_tensor::<f32>();
-            let i64_result = value.try_extract_tensor::<i64>();
-
-            match (f32_result, i64_result) {
-                (Ok((shape, data)), _) => {
-                    let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
-                    results.push((name.to_string(), shape_i64, TensorData::F32(data.to_vec())));
-                }
-                (_, Ok((shape, data))) => {
-                    let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
-                    results.push((name.to_string(), shape_i64, TensorData::I64(data.to_vec())));
-                }
-                (Err(e1), Err(e2)) => {
-                    let e1_str = format!("{}", e1);
-                    let hint = if e1_str.contains("Sequence") || e1_str.contains("Map") {
-                        " (tree-based models may output Sequence<Map> — re-export with ZipMap=False or use tensor outputs)"
-                    } else {
-                        ""
-                    };
-                    return Err(anyhow::anyhow!(
-                        "failed to extract tensor for '{}': f32={}, i64={}.{}",
-                        name, e1_str, e2, hint
-                    ));
-                }
+            match extract_output(name, &value) {
+                Ok((shape, data)) => results.push((name.to_string(), shape, data)),
+                Err(e) => return Err(e),
             }
         }
 
         Ok(results)
     }
+}
+
+fn extract_output(name: &str, value: &ort::value::ValueRef<'_>) -> anyhow::Result<(Vec<i64>, TensorData)> {
+    let f32_res = value.try_extract_tensor::<f32>();
+    let i64_res = value.try_extract_tensor::<i64>();
+
+    if let Ok((shape, data)) = f32_res {
+        let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+        return Ok((shape_i64, TensorData::F32(data.to_vec())));
+    }
+    if let Ok((shape, data)) = i64_res {
+        let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+        return Ok((shape_i64, TensorData::I64(data.to_vec())));
+    }
+
+    let err_str = format!("{}", f32_res.err().unwrap());
+    if err_str.contains("Sequence") {
+        return extract_tree_sequence(name, value);
+    }
+
+    Err(anyhow::anyhow!(
+        "failed to extract tensor for '{}': f32={}, i64={}",
+        name,
+        err_str,
+        i64_res.err().map(|e| format!("{}", e)).unwrap_or_default()
+    ))
+}
+
+fn extract_tree_sequence(name: &str, value: &ort::value::ValueRef<'_>) -> anyhow::Result<(Vec<i64>, TensorData)> {
+    let maps = value.try_extract_sequence::<ort::value::DynValueTypeMarker>()
+        .map_err(|e| anyhow::anyhow!("failed to extract sequence from '{}': {}", name, e))?;
+
+    if maps.is_empty() {
+        return Err(anyhow::anyhow!("empty sequence output for '{}'", name));
+    }
+
+    let first_map = &maps[0];
+    let probs: HashMap<i64, f32> = first_map
+        .try_extract_map::<i64, f32>()
+        .map_err(|e| anyhow::anyhow!("failed to extract map from '{}': {}", name, e))?;
+
+    let num_classes = probs.len();
+    let max_key = probs.keys().max().copied().unwrap_or(0);
+    let class_dim = (max_key + 1).max(num_classes as i64) as usize;
+
+    let batch_size = maps.len();
+    let mut flat_probs = Vec::with_capacity(batch_size * class_dim);
+
+    for map_val in &maps {
+        let class_map: HashMap<i64, f32> = map_val
+            .try_extract_map::<i64, f32>()
+            .map_err(|e| anyhow::anyhow!("failed to extract map element from '{}': {}", name, e))?;
+
+        let mut row = vec![0.0f32; class_dim];
+        for (k, v) in class_map {
+            if k >= 0 && (k as usize) < class_dim {
+                row[k as usize] = v;
+            }
+        }
+        flat_probs.extend(row);
+    }
+
+    let shape = vec![batch_size as i64, class_dim as i64];
+    Ok((shape, TensorData::F32(flat_probs)))
 }
 
 #[cfg(test)]
@@ -129,10 +165,6 @@ mod tests {
             return;
         }
         let runner = ModelRunner::load(path);
-        assert!(
-            runner.is_ok(),
-            "Failed to load model: {:?}",
-            runner.err()
-        );
+        assert!(runner.is_ok(), "Failed to load model: {:?}", runner.err());
     }
 }
