@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: control-plane
-          image: axon/control-plane:latest
+          image: mustdo12/axon-control-plane:v0.0.1
           imagePullPolicy: IfNotPresent
           ports:
             - containerPort: 8080
@@ -58,7 +58,7 @@ spec:
               mountPath: /run
 
         - name: inference-engine
-          image: axon/inference-engine:latest
+          image: mustdo12/axon-inference-engine:v0.0.1
           imagePullPolicy: IfNotPresent
           env:
             - name: SOCKET_PATH
