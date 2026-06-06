@@ -15,6 +15,9 @@ dist/
 *.dll
 *.so
 *.dylib
+*.pbtxt
+ARCHITECTURE.md
+local_models/
 
 .idea/
 .vscode/
