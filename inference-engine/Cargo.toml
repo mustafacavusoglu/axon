@@ -26,6 +26,10 @@ thiserror = "2"
 ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
 arc-swap = "1"
 tokio-stream = "0.1"
+tracing-opentelemetry = "0.33.0"
+opentelemetry = "0.32.0"
+opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
+opentelemetry_sdk = "0.32.1"
 
 [build-dependencies]
 tonic-build = "0.12"

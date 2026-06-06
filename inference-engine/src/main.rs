@@ -4,19 +4,57 @@ mod arena;
 mod config;
 mod metrics;
 
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use std::time::Duration;
+
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::trace::SdkTracerProvider;
+use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter, Layer};
 
 use config::EngineConfig;
 use session::pool::SessionPool;
 
-fn main() -> anyhow::Result<()> {
+fn init_tracing() -> Option<SdkTracerProvider> {
+    let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
+        .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
+        .ok()?;
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(endpoint)
+        .with_timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .build();
+
+    let tracer = provider.tracer("inference-engine");
+    let _ = opentelemetry::global::set_tracer_provider(provider.clone());
+
+    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env()
             .unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(tracing_subscriber::fmt::layer()
-            .json()
-            .with_current_span(true))
+        .with(tracing_subscriber::fmt::layer().json().with_current_span(true))
+        .with(otel_layer)
         .init();
+
+    Some(provider)
+}
+
+fn main() -> anyhow::Result<()> {
+    let provider = init_tracing();
+
+    if provider.is_none() {
+        tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info")))
+            .with(tracing_subscriber::fmt::layer().json().with_current_span(true))
+            .init();
+    }
 
     let config = EngineConfig::from_env()?;
     let pool = SessionPool::new(config.num_threads)?;
@@ -37,6 +75,10 @@ fn main() -> anyhow::Result<()> {
     );
 
     rt.block_on(server::serve(socket, config, pool, arena))?;
+
+    if let Some(p) = provider {
+        let _ = p.shutdown();
+    }
 
     Ok(())
 }
