@@ -287,10 +287,10 @@ type inferResponse struct {
 }
 
 type inferOutput struct {
-	Name     string  `json:"name"`
-	Shape    []int64 `json:"shape"`
-	Datatype string  `json:"datatype"`
-	Data     []float64 `json:"data"`
+	Name     string        `json:"name"`
+	Datatype string        `json:"datatype"`
+	Shape    []int64       `json:"shape"`
+	Data     []interface{} `json:"data"`
 }
 
 func buildOutputs(outputs []*enginev1.InferOutput) []inferOutput {
@@ -306,7 +306,7 @@ func buildOutputs(outputs []*enginev1.InferOutput) []inferOutput {
 		switch {
 		case dt == "FP32" && len(out.Data) >= 4:
 			n := len(out.Data) / 4
-			o.Data = make([]float64, n)
+			o.Data = make([]interface{}, n)
 			for i := 0; i < n; i++ {
 				bits := binary.LittleEndian.Uint32(out.Data[i*4 : i*4+4])
 				o.Data[i] = float64(math.Float32frombits(bits))
@@ -314,18 +314,18 @@ func buildOutputs(outputs []*enginev1.InferOutput) []inferOutput {
 
 		case dt == "INT64" && len(out.Data) >= 8:
 			n := len(out.Data) / 8
-			o.Data = make([]float64, n)
+			o.Data = make([]interface{}, n)
 			for i := 0; i < n; i++ {
-				val := binary.LittleEndian.Uint64(out.Data[i*8 : i*8+8])
-				o.Data[i] = float64(int64(val))
+				val := int64(binary.LittleEndian.Uint64(out.Data[i*8 : i*8+8]))
+				o.Data[i] = val
 			}
 
 		case dt == "INT32" && len(out.Data) >= 4:
 			n := len(out.Data) / 4
-			o.Data = make([]float64, n)
+			o.Data = make([]interface{}, n)
 			for i := 0; i < n; i++ {
-				val := binary.LittleEndian.Uint32(out.Data[i*4 : i*4+4])
-				o.Data[i] = float64(int32(val))
+				val := int32(binary.LittleEndian.Uint32(out.Data[i*4 : i*4+4]))
+				o.Data[i] = val
 			}
 		}
 
