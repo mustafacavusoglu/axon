@@ -108,3 +108,22 @@ make proto        # Protobuf kodunu yeniden üret (buf)
 
 ---
 
+## Sıradaki Özellikler
+
+- Dynamic batching — modele özel istekleri biriktirip toplu işleme
+- Ensemble pipelines — modelleri zincirleme (A çıktısı → B girdisi)
+- OpenVINO backend — Intel CPU optimizasyonu
+- Model warmup — ilk yüklemede ONNX oturumlarını ısıtma
+- Authentication — API key + mTLS
+- Binary tensor extension — büyük veriler için raw bytes
+- Graceful rolling update — sıfır istek kaybıyla yeniden başlatma
+- Rate limiting middleware
+- Model A/B traffic splitting
+- LRU eviction — bellek baskısında en az kullanılan modeli kaldırma
+- FSWatcher — model dosyası değişikliklerinde otomatik yeniden yükleme
+- Swagger UI — OpenAPI 3.0 tarayıcı tabanlı dökümantasyon
+- Distributed trace propagation — Go ↔ Rust span bağlantısı
+- NUMA-aware session pools — çok soketli sunucu optimizasyonu
+
+---
+

@@ -109,3 +109,22 @@ make proto        # Regenerate protobuf code (buf)
 ```
 
 ---
+
+## Upcoming Features
+
+- Dynamic batching — accumulate requests into batches per model
+- Ensemble pipelines — chain models (A output → B input)
+- OpenVINO backend — Intel CPU optimization
+- Model warmup — pre-warm ONNX sessions on load
+- Authentication — API key + mTLS
+- Binary tensor extension — raw bytes for large payloads
+- Graceful rolling update — zero dropped requests
+- Rate limiting middleware
+- Model A/B traffic splitting
+- LRU eviction — evict least-used model under memory pressure
+- FSWatcher — hot reload on model file changes
+- Swagger UI — OpenAPI 3.0 browsable docs
+- Distributed trace propagation — Go ↔ Rust span linking
+- NUMA-aware session pools — multi-socket server optimization
+
+---
