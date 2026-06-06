@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"os/signal"
@@ -17,6 +16,7 @@ import (
 	"github.com/mustafacavusoglu/axon/control-plane/internal/client"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/config"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/health"
+	zaplog "github.com/mustafacavusoglu/axon/control-plane/internal/log"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/manager"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/metrics"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
@@ -27,14 +27,19 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("failed to load config: %v", err)
+		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
+		os.Exit(1)
 	}
+
+	zaplog.Init(cfg.LogLevel)
+	defer zaplog.Sync()
+	log := zaplog.L
 
 	metrics.Init()
 
 	engineClient, err := client.NewInferenceClient(cfg.InferenceSocket)
 	if err != nil {
-		log.Fatalf("failed to connect to inference engine: %v", err)
+		log.Fatalw("failed to connect to inference engine", "error", err)
 	}
 	defer engineClient.Close()
 
@@ -48,9 +53,9 @@ func main() {
 
 	go func() {
 		addr := fmt.Sprintf(":%d", cfg.HTTPPort)
-		log.Printf("HTTP server listening on %s", addr)
+		log.Infow("HTTP server listening", "addr", addr)
 		if err := app.Listen(addr); err != nil {
-			log.Fatalf("HTTP server error: %v", err)
+			log.Fatalw("HTTP server error", "error", err)
 		}
 	}()
 
@@ -65,46 +70,46 @@ func main() {
 		addr := fmt.Sprintf(":%d", cfg.GRPCPort)
 		listener, err := net.Listen("tcp", addr)
 		if err != nil {
-			log.Fatalf("gRPC server listen error: %v", err)
+			log.Fatalw("gRPC server listen error", "error", err)
 		}
-		log.Printf("gRPC server listening on %s", addr)
+		log.Infow("gRPC server listening", "addr", addr)
 		if err := grpcServer.Serve(listener); err != nil {
-			log.Fatalf("gRPC server error: %v", err)
+			log.Fatalw("gRPC server error", "error", err)
 		}
 	}()
 
 	go func() {
-		log.Print("waiting for inference engine...")
+		log.Info("waiting for inference engine...")
 		for i := 0; i < 30; i++ {
 			if checker.IsLive() {
-				log.Print("engine ready, loading models...")
+				log.Info("engine ready, loading models...")
 				break
 			}
 			time.Sleep(time.Second)
 		}
 		if err := lifecycle.LoadAllFromRepo(cfg.ModelRepoPath); err != nil {
-			log.Printf("warning: failed to load models from repo: %v", err)
+			log.Warnw("failed to load models from repo", "error", err)
 		}
-		log.Print("model loading complete")
+		log.Info("model loading complete")
 	}()
 
 	quit := make(chan os.Signal, 1)
 	signal.Notify(quit, syscall.SIGTERM, syscall.SIGINT)
 	<-quit
 
-	log.Println("shutting down...")
+	log.Info("shutting down...")
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.DrainTimeout)
 	defer cancel()
 
 	if err := app.ShutdownWithTimeout(cfg.DrainTimeout); err != nil {
-		log.Printf("HTTP shutdown error: %v", err)
+		log.Warnw("HTTP shutdown error", "error", err)
 	}
 
 	grpcServer.GracefulStop()
 
 	<-ctx.Done()
-	log.Println("server stopped")
+	log.Info("server stopped")
 }
 
 func loggingInterceptor(
@@ -115,7 +120,10 @@ func loggingInterceptor(
 ) (interface{}, error) {
 	start := time.Now()
 	resp, err := handler(ctx, req)
-	elapsed := time.Since(start)
-	log.Printf("gRPC %s | %s | %v", info.FullMethod, elapsed, err)
+	zaplog.L.Infow("gRPC call",
+		"method", info.FullMethod,
+		"duration_ms", time.Since(start).Milliseconds(),
+		"error", err,
+	)
 	return resp, err
 }

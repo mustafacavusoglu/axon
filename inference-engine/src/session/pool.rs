@@ -3,6 +3,7 @@ use std::sync::{Arc, atomic::AtomicU64};
 
 use anyhow::Context;
 use dashmap::DashMap;
+use tokio::sync::Semaphore;
 
 use crate::session::runner::ModelRunner;
 
@@ -20,6 +21,7 @@ pub struct ModelSession {
     pub state: SessionState,
     pub memory_bytes: AtomicU64,
     pub runner: Arc<ModelRunner>,
+    pub concurrency: Arc<Semaphore>,
 }
 
 fn model_key(name: &str, version: u32) -> String {
@@ -51,6 +53,7 @@ impl SessionPool {
         name: &str,
         version: u32,
         model_path: &PathBuf,
+        concurrency: u32,
     ) -> anyhow::Result<Arc<ModelSession>> {
         let key = model_key(name, version);
 
@@ -63,12 +66,14 @@ impl SessionPool {
         let model_file = model_path.join("model.onnx");
         let runner = ModelRunner::load(&model_file)?;
 
+        let count = if concurrency > 0 { concurrency } else { 1 };
         let session = Arc::new(ModelSession {
             name: name.to_string(),
             version,
             state: SessionState::Ready,
             memory_bytes: AtomicU64::new(runner.estimate_memory()),
             runner: Arc::new(runner),
+            concurrency: Arc::new(Semaphore::new(count as usize)),
         });
 
         self.sessions.insert(key, session.clone());

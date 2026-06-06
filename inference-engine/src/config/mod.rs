@@ -5,6 +5,7 @@ pub struct EngineConfig {
     pub socket_path: PathBuf,
     pub num_threads: usize,
     pub arena_size_mb: usize,
+    pub inference_timeout_ms: u64,
 }
 
 impl EngineConfig {
@@ -22,6 +23,10 @@ impl EngineConfig {
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(4096),
+            inference_timeout_ms: std::env::var("INFERENCE_TIMEOUT_MS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(30000),
         })
     }
 }

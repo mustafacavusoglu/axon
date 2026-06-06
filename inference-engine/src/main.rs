@@ -27,14 +27,16 @@ fn main() -> anyhow::Result<()> {
         .enable_all()
         .build()?;
 
+    let socket = config.socket_path.clone();
     tracing::info!(
-        socket = %config.socket_path.display(),
+        socket = %socket.display(),
         threads = config.num_threads,
         arena_mb = config.arena_size_mb,
+        timeout_ms = config.inference_timeout_ms,
         "starting inference engine"
     );
 
-    rt.block_on(server::serve(config.socket_path, pool, arena))?;
+    rt.block_on(server::serve(socket, config, pool, arena))?;
 
     Ok(())
 }

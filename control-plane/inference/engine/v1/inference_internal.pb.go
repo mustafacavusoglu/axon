@@ -349,6 +349,7 @@ type LoadModelRequest struct {
 	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
 	Version       uint32                 `protobuf:"varint,2,opt,name=version,proto3" json:"version,omitempty"`
 	ModelPath     string                 `protobuf:"bytes,3,opt,name=model_path,json=modelPath,proto3" json:"model_path,omitempty"`
+	Concurrency   uint32                 `protobuf:"varint,4,opt,name=concurrency,proto3" json:"concurrency,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -402,6 +403,13 @@ func (x *LoadModelRequest) GetModelPath() string {
 		return x.ModelPath
 	}
 	return ""
+}
+
+func (x *LoadModelRequest) GetConcurrency() uint32 {
+	if x != nil {
+		return x.Concurrency
+	}
+	return 0
 }
 
 type LoadModelResponse struct {
@@ -794,12 +802,13 @@ const file_inference_engine_v1_inference_internal_proto_rawDesc = "" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
 	"\x04data\x18\x02 \x01(\fR\x04data\x12\x14\n" +
 	"\x05shape\x18\x03 \x03(\x03R\x05shape\x123\n" +
-	"\x05dtype\x18\x04 \x01(\x0e2\x1d.inference.engine.v1.DataTypeR\x05dtype\"_\n" +
+	"\x05dtype\x18\x04 \x01(\x0e2\x1d.inference.engine.v1.DataTypeR\x05dtype\"\x81\x01\n" +
 	"\x10LoadModelRequest\x12\x12\n" +
 	"\x04name\x18\x01 \x01(\tR\x04name\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\rR\aversion\x12\x1d\n" +
 	"\n" +
-	"model_path\x18\x03 \x01(\tR\tmodelPath\"C\n" +
+	"model_path\x18\x03 \x01(\tR\tmodelPath\x12 \n" +
+	"\vconcurrency\x18\x04 \x01(\rR\vconcurrency\"C\n" +
 	"\x11LoadModelResponse\x12\x18\n" +
 	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
 	"\x05error\x18\x02 \x01(\tR\x05error\"B\n" +

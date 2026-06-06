@@ -39,9 +39,10 @@ message InferOutput {
 }
 
 message LoadModelRequest {
-  string name       = 1;
-  uint32 version    = 2;
-  string model_path = 3;
+  string name        = 1;
+  uint32 version     = 2;
+  string model_path  = 3;
+  uint32 concurrency = 4;
 }
 
 message LoadModelResponse {

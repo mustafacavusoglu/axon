@@ -51,11 +51,12 @@ func (c *InferenceClient) BatchInfer(
 	})
 }
 
-func (c *InferenceClient) LoadModel(ctx context.Context, name string, version uint32, modelPath string) error {
+func (c *InferenceClient) LoadModel(ctx context.Context, name string, version uint32, modelPath string, concurrency uint32) error {
 	resp, err := c.client.LoadModel(ctx, &enginev1.LoadModelRequest{
-		Name:      name,
-		Version:   version,
-		ModelPath: modelPath,
+		Name:        name,
+		Version:     version,
+		ModelPath:   modelPath,
+		Concurrency: concurrency,
 	})
 	if err != nil {
 		return err

@@ -2,10 +2,10 @@ package health
 
 import (
 	"context"
-	"log"
 	"time"
 
 	"github.com/mustafacavusoglu/axon/control-plane/internal/client"
+	zaplog "github.com/mustafacavusoglu/axon/control-plane/internal/log"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/manager"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -28,10 +28,10 @@ func (c *Checker) IsLive() bool {
 	defer cancel()
 	resp, err := c.client.Healthcheck(ctx)
 	if err != nil {
-		log.Printf("healthcheck failed: %v", err)
+		zaplog.L.Warnw("healthcheck failed", "error", err)
 		return false
 	}
-	log.Printf("healthcheck OK, uptime=%ds", resp.UptimeSec)
+	zaplog.L.Debugw("healthcheck OK", "uptime_sec", resp.UptimeSec)
 	return true
 }
 

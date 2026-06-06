@@ -1,10 +1,11 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use tokio::net::UnixListener;
 use tokio_stream::wrappers::UnixListenerStream;
 use tonic::transport::Server;
 
+use crate::config::EngineConfig;
 use crate::session::runner::{InputTensor, TensorData};
 use crate::arena::TensorArena;
 use crate::metrics;
@@ -24,13 +25,15 @@ use engine::{
 pub struct InferenceEngineImpl {
     pool: SessionPool,
     start_time: Instant,
+    timeout: Duration,
 }
 
 impl InferenceEngineImpl {
-    pub fn new(pool: SessionPool, _arena: TensorArena) -> Self {
+    pub fn new(pool: SessionPool, _arena: TensorArena, timeout_ms: u64) -> Self {
         Self {
             pool,
             start_time: Instant::now(),
+            timeout: Duration::from_millis(timeout_ms),
         }
     }
 }
@@ -47,6 +50,10 @@ impl InferenceEngine for InferenceEngineImpl {
         let session = self.pool.get(&req.model_name, req.version).map_err(|e| {
             tonic::Status::not_found(format!("model not found: {}", e))
         })?;
+
+        let _permit = session.concurrency.acquire().await.map_err(|e| {
+            tonic::Status::resource_exhausted(format!("model concurrency limit reached: {}", e))
+        });
 
         let inputs: Vec<(String, InputTensor)> = req
             .inputs
@@ -89,13 +96,19 @@ impl InferenceEngine for InferenceEngineImpl {
             })
             .collect::<Result<Vec<_>, tonic::Status>>()?;
 
-        let outputs = tokio::task::spawn_blocking({
+        let timeout = self.timeout;
+        let infer_future = tokio::task::spawn_blocking({
             let runner = session.runner.clone();
             move || runner.run(inputs)
-        })
-        .await
-        .map_err(|e| tonic::Status::internal(format!("spawn error: {}", e)))?
-        .map_err(|e| tonic::Status::internal(format!("inference error: {}", e)))?;
+        });
+
+        let outputs = tokio::time::timeout(timeout, infer_future)
+            .await
+            .map_err(|_| tonic::Status::deadline_exceeded(format!(
+                "inference timed out after {}ms", timeout.as_millis()
+            )))?
+            .map_err(|e| tonic::Status::internal(format!("spawn error: {}", e)))?
+            .map_err(|e| tonic::Status::internal(format!("inference error: {}", e)))?;
 
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
 
@@ -132,6 +145,7 @@ impl InferenceEngine for InferenceEngineImpl {
     ) -> Result<tonic::Response<LoadModelResponse>, tonic::Status> {
         let req = request.into_inner();
         let model_path = PathBuf::from(&req.model_path);
+        let concurrency = req.concurrency;
 
         let pool = self.pool.clone();
         let name = req.name.clone();
@@ -139,7 +153,7 @@ impl InferenceEngine for InferenceEngineImpl {
         let version = req.version;
 
         match tokio::task::spawn_blocking(move || {
-            pool.load_model(&name, version, &model_path)
+            pool.load_model(&name, version, &model_path, concurrency)
         }).await {
             Ok(Ok(_)) => Ok(tonic::Response::new(LoadModelResponse {
                 success: true,
@@ -265,6 +279,7 @@ fn parse_i64(data: &[u8], shape: &[usize], name: &str) -> Result<Vec<i64>, tonic
 
 pub async fn serve(
     socket_path: std::path::PathBuf,
+    config: EngineConfig,
     pool: SessionPool,
     arena: TensorArena,
 ) -> anyhow::Result<()> {
@@ -277,7 +292,7 @@ pub async fn serve(
     }
 
     let uds = UnixListener::bind(&socket_path)?;
-    let svc = InferenceEngineImpl::new(pool, arena);
+    let svc = InferenceEngineImpl::new(pool, arena, config.inference_timeout_ms);
 
     tracing::info!(path = %socket_path.display(), "gRPC server listening");
 
