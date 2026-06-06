@@ -19,7 +19,9 @@ import (
 	zaplog "github.com/mustafacavusoglu/axon/control-plane/internal/log"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/manager"
 	"github.com/mustafacavusoglu/axon/control-plane/internal/metrics"
+	"github.com/mustafacavusoglu/axon/control-plane/internal/tracing"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/reflection"
 )
@@ -34,6 +36,15 @@ func main() {
 	zaplog.Init(cfg.LogLevel)
 	defer zaplog.Sync()
 	log := zaplog.L
+
+	if err := tracing.Init(context.Background(), "axon-control-plane"); err != nil {
+		log.Warnw("tracing init failed", "error", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		tracing.Shutdown(ctx)
+	}()
 
 	metrics.Init()
 
@@ -61,6 +72,7 @@ func main() {
 
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(loggingInterceptor),
+		grpc.StatsHandler(otelgrpc.NewServerHandler()),
 	)
 	grpcSvc := grpcsvc.NewGRPCServer(registry, engineClient)
 	kfs.RegisterGRPCInferenceServiceServer(grpcServer, grpcSvc)

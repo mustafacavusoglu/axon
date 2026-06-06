@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	enginev1 "github.com/mustafacavusoglu/axon/control-plane/inference/engine/v1"
+	"go.opentelemetry.io/contrib/instrumentation/google.golang.org/grpc/otelgrpc"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 )
@@ -19,6 +20,7 @@ func NewInferenceClient(socketPath string) (*InferenceClient, error) {
 	conn, err := grpc.Dial(
 		"unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithStatsHandler(otelgrpc.NewClientHandler()),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to inference engine: %w", err)
