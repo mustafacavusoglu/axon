@@ -117,9 +117,13 @@ func (s *GRPCServer) ModelInfer(ctx context.Context, req *kfs.ModelInferRequest)
 
 	var internalInputs []*enginev1.InferInput
 	for _, inp := range req.Inputs {
+		shape := inp.Shape
+		if entry.Config.MaxBatchSize > 1 && len(shape) > 0 {
+			shape = append([]int64{1}, shape...)
+		}
 		internalInputs = append(internalInputs, &enginev1.InferInput{
 			Name:  inp.Name,
-			Shape: inp.Shape,
+			Shape: shape,
 			Data:  inp.RawData,
 			Dtype: strToInternalDataType(inp.Datatype),
 		})

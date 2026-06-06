@@ -195,10 +195,15 @@ func (h *Handler) Infer(c *fiber.Ctx) error {
 			})
 		}
 
+		shape := inp.Shape
+		if entry.Config.MaxBatchSize > 1 && len(shape) > 0 {
+			shape = append([]int64{1}, shape...)
+		}
+
 		dtype := dtypeToInternal(inp.Datatype)
 		internalInputs = append(internalInputs, &enginev1.InferInput{
 			Name:  inp.Name,
-			Shape: inp.Shape,
+			Shape: shape,
 			Data:  rawBytes,
 			Dtype: dtype,
 		})

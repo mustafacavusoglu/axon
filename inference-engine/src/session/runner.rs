@@ -46,13 +46,8 @@ impl ModelRunner {
                 anyhow::anyhow!("failed to load ONNX model {}: {}", model_path.display(), e)
             })?;
 
-        let input_names: Vec<String> = session.inputs().iter().map(|i| i.name().to_string()).collect();
-        let output_names: Vec<String> = session.outputs().iter().map(|o| o.name().to_string()).collect();
-
         tracing::info!(
             path = %model_path.display(),
-            ?input_names,
-            ?output_names,
             "ONNX session created"
         );
 
@@ -102,14 +97,42 @@ impl ModelRunner {
                     results.push((name.to_string(), shape_i64, TensorData::I64(data.to_vec())));
                 }
                 (Err(e1), Err(e2)) => {
+                    let e1_str = format!("{}", e1);
+                    let hint = if e1_str.contains("Sequence") || e1_str.contains("Map") {
+                        " (tree-based models may output Sequence<Map> — re-export with ZipMap=False or use tensor outputs)"
+                    } else {
+                        ""
+                    };
                     return Err(anyhow::anyhow!(
-                        "failed to extract tensor for '{}': f32_err={}, i64_err={}",
-                        name, e1, e2
+                        "failed to extract tensor for '{}': f32={}, i64={}.{}",
+                        name, e1_str, e2, hint
                     ));
                 }
             }
         }
 
         Ok(results)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_load_onnx_model() {
+        let path = std::path::Path::new(
+            "/Users/mustafacavusoglu/workspace/axon/local_models/model_repository/lgbm_breast_cancer/1/model.onnx"
+        );
+        if !path.exists() {
+            eprintln!("SKIP: model file not found");
+            return;
+        }
+        let runner = ModelRunner::load(path);
+        assert!(
+            runner.is_ok(),
+            "Failed to load model: {:?}",
+            runner.err()
+        );
     }
 }

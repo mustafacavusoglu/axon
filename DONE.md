@@ -70,7 +70,17 @@
 - [x] Prometheus `MustRegister` duplicate hatası → `promauto` auto-register
 - [x] Rust engine: INT64 output desteği (TensorData enum: F32/I64)
 - [x] Rust engine: output dtype auto-detection (f32 fallback → i64)
+- [x] Rust engine: Sequence<Map> için anlamlı hata mesajı (tree-based model guidance)
 - [x] HTTP handler: JSON `data` array desteği (FP32, INT64, INT32)
 - [x] HTTP response: `data` array formatında çıktı (raw bytes → float64 slice)
+- [x] Auto-prepend batch dimension: `max_batch_size > 1` ise input'a `[1]` prepend
+- [x] `ort` v2.0.0-rc.12 patch: Map type `todo!()` → `Err(...)` (ONNX model load crash fix)
 - [x] `run.sh` — Local development script (build + run both services)
 - [x] `control-plane/internal/manager/config_parser_test.go` — Unit test
+- [x] `inference-engine/src/session/runner.rs` — ONNX model load test
+
+## Known Limitations
+
+- **Tree-based classification modeller (LightGBM, XGBoost, CatBoost, RF)**: `ort` v2.0.0-rc.12 Sequence<Map> output desteklemiyor. Modellerin `ZipMap=False` opsiyonuyla re-export edilmesi gerekiyor.
+- **`ort` v2.0.0-rc.12**: Map type için `todo!()` panic'i manuel patch ile fix edildi (bkz. `cargo clean` sonrası rebuild).
+- **Regression modelleri** (skl_gradient_boosting_california_housing): Tam çalışıyor, tensor output → 2.6729 tahmini doğrulandı.
