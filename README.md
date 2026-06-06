@@ -1,5 +1,9 @@
 # Axon — CPU Inference Server
 
+
+> [Türkçe dökümantasyon](README_TR.md)
+
+
 Triton-compatible, CPU-first model serving infrastructure.  
 **Control Plane:** Go · **Inference Engine:** Rust  
 **Transport:** gRPC + HTTP/REST (KServe v2)  
@@ -105,5 +109,3 @@ make proto        # Regenerate protobuf code (buf)
 ```
 
 ---
-
-> [Türkçe dökümantasyon](README_TR.md)
