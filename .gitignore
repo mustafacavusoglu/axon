@@ -17,6 +17,7 @@ dist/
 *.dylib
 *.pbtxt
 ARCHITECTURE.md
+DONE.md
 local_models/
 
 .idea/
@@ -29,3 +30,4 @@ local_models/
 *.local
 
 local_models/models/*.pkl
+aklıma-gelenler.md
