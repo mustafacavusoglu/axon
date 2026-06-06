@@ -2,27 +2,41 @@ FROM rust:1.88-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
+    pkg-config \
+    libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build
 
 COPY inference-engine/Cargo.toml inference-engine/Cargo.lock* inference-engine/build.rs ./
-RUN mkdir src && echo "fn main() {}" > src/main.rs
-RUN cargo build --release 2>/dev/null || true
+COPY proto/ ../proto/
+RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release
 
 COPY inference-engine/src/ ./src/
-COPY proto/ ../proto/
 
-RUN cargo build --release
+RUN cargo fetch
+RUN find /usr/local/cargo/registry/src -path '*/ort-2.0.0-rc.12/src/value/type.rs' \
+    -exec sh -c 'sed -i "s/todo!();/return Err(crate::Error::new_with_code(crate::ErrorCode::GenericFailure, \"Map type not supported\"));/" "$1" && echo "patched $1"' _ {} \;
+RUN rm -rf target/release/.fingerprint/ort* target/release/deps/*ort* target/release/libonnx* && cargo build --release 2>&1 | tail -5
 
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    libonnxruntime \
+    curl \
     && rm -rf /var/lib/apt/lists/*
 
+ARG ONNX_VERSION=1.24.2
+ARG TARGETARCH=arm64
+RUN if [ "$TARGETARCH" = "arm64" ]; then ARCH="aarch64"; else ARCH="x64"; fi && \
+    curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ARCH}-${ONNX_VERSION}.tgz" -o /tmp/onnx.tgz && \
+    tar xzf /tmp/onnx.tgz -C /opt && \
+    cp /opt/onnxruntime-linux-${ARCH}-${ONNX_VERSION}/lib/libonnxruntime.so* /usr/local/lib/ && \
+    rm -rf /opt/onnxruntime-linux-* /tmp/onnx.tgz
+
 COPY --from=builder /build/target/release/inference-engine /usr/local/bin/inference-engine
+
+ENV LD_LIBRARY_PATH=/usr/local/lib
 
 VOLUME ["/models", "/run"]
 

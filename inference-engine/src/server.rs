@@ -133,13 +133,27 @@ impl InferenceEngine for InferenceEngineImpl {
         let req = request.into_inner();
         let model_path = PathBuf::from(&req.model_path);
 
-        match self.pool.load_model(&req.name, req.version, &model_path).await {
-            Ok(_) => Ok(tonic::Response::new(LoadModelResponse {
+        let pool = self.pool.clone();
+        let name = req.name.clone();
+        let name_for_err = name.clone();
+        let version = req.version;
+
+        match tokio::task::spawn_blocking(move || {
+            pool.load_model(&name, version, &model_path)
+        }).await {
+            Ok(Ok(_)) => Ok(tonic::Response::new(LoadModelResponse {
                 success: true,
                 error: String::new(),
             })),
+            Ok(Err(e)) => {
+                tracing::error!(name=%name_for_err, version=version, error=%e, "model load failed");
+                Ok(tonic::Response::new(LoadModelResponse {
+                    success: false,
+                    error: e.to_string(),
+                }))
+            }
             Err(e) => {
-                tracing::error!(name=%req.name, version=req.version, error=%e, "model load failed");
+                tracing::error!(name=%name_for_err, version=version, error=%e, "spawn_blocking failed");
                 Ok(tonic::Response::new(LoadModelResponse {
                     success: false,
                     error: e.to_string(),

@@ -3,9 +3,11 @@ package manager
 import (
 	"context"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
+	"time"
 
 	"github.com/mustafacavusoglu/axon/control-plane/internal/client"
 )
@@ -43,7 +45,10 @@ func (m *LifecycleManager) LoadModel(name string, version int) error {
 
 	m.registry.Set(name, version, config)
 
-	err = m.client.LoadModel(context.Background(), name, uint32(version), filepath.Dir(modelPath))
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	log.Printf("sending LoadModel to engine: %s v%d path=%s", name, version, filepath.Dir(modelPath))
+	err = m.client.LoadModel(ctx, name, uint32(version), filepath.Dir(modelPath))
 	if err != nil {
 		m.registry.MarkError(name, version)
 		return fmt.Errorf("failed to load model %s on engine: %w", name, err)
@@ -96,8 +101,19 @@ func (m *LifecycleManager) LoadAllFromRepo(repoPath string) error {
 				continue
 			}
 
-			if err := m.LoadModel(modelName, version); err != nil {
-				fmt.Printf("warning: failed to load %s:%d - %v\n", modelName, version, err)
+			var loadErr error
+			for retry := 0; retry < 3; retry++ {
+				if retry > 0 {
+					time.Sleep(2 * time.Second)
+				}
+				loadErr = m.LoadModel(modelName, version)
+				if loadErr == nil {
+					break
+				}
+				fmt.Printf("warning: failed to load %s:%d (attempt %d/3): %v\n", modelName, version, retry+1, loadErr)
+			}
+			if loadErr != nil {
+				fmt.Printf("warning: failed to load %s:%d after retries: %v\n", modelName, version, loadErr)
 			}
 		}
 	}

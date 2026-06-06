@@ -3,7 +3,6 @@ package client
 import (
 	"context"
 	"fmt"
-	"net"
 
 	enginev1 "github.com/mustafacavusoglu/axon/control-plane/inference/engine/v1"
 	"google.golang.org/grpc"
@@ -13,16 +12,13 @@ import (
 type InferenceClient struct {
 	conn   *grpc.ClientConn
 	client enginev1.InferenceEngineClient
+	socket string
 }
 
 func NewInferenceClient(socketPath string) (*InferenceClient, error) {
 	conn, err := grpc.Dial(
-		fmt.Sprintf("unix://%s", socketPath),
+		"unix://"+socketPath,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
-			var d net.Dialer
-			return d.DialContext(ctx, "unix", socketPath)
-		}),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to inference engine: %w", err)
@@ -32,6 +28,7 @@ func NewInferenceClient(socketPath string) (*InferenceClient, error) {
 	return &InferenceClient{
 		conn:   conn,
 		client: client,
+		socket: socketPath,
 	}, nil
 }
 

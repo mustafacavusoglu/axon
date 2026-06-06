@@ -196,7 +196,7 @@ func (h *Handler) Infer(c *fiber.Ctx) error {
 		}
 
 		shape := inp.Shape
-		if entry.Config.MaxBatchSize > 1 && len(shape) > 0 {
+		if entry.Config.MaxBatchSize > 1 && len(shape) > 0 && len(entry.Config.Inputs) == 1 {
 			shape = append([]int64{1}, shape...)
 		}
 

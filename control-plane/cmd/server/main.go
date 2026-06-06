@@ -42,13 +42,8 @@ func main() {
 	lifecycle := manager.NewLifecycleManager(registry, engineClient, cfg.ModelRepoPath)
 	checker := health.NewChecker(registry, engineClient)
 
-	if err := lifecycle.LoadAllFromRepo(cfg.ModelRepoPath); err != nil {
-		log.Printf("warning: failed to load models from repo: %v", err)
-	}
-
 	httpHandler := httphandler.NewHandler(registry, lifecycle, engineClient, checker)
 	app := httphandler.NewApp(httpHandler)
-
 	app.Get("/metrics", adaptor.HTTPHandler(promhttp.Handler()))
 
 	go func() {
@@ -62,7 +57,6 @@ func main() {
 	grpcServer := grpc.NewServer(
 		grpc.ChainUnaryInterceptor(loggingInterceptor),
 	)
-
 	grpcSvc := grpcsvc.NewGRPCServer(registry, engineClient)
 	kfs.RegisterGRPCInferenceServiceServer(grpcServer, grpcSvc)
 	reflection.Register(grpcServer)
@@ -77,6 +71,21 @@ func main() {
 		if err := grpcServer.Serve(listener); err != nil {
 			log.Fatalf("gRPC server error: %v", err)
 		}
+	}()
+
+	go func() {
+		log.Print("waiting for inference engine...")
+		for i := 0; i < 30; i++ {
+			if checker.IsLive() {
+				log.Print("engine ready, loading models...")
+				break
+			}
+			time.Sleep(time.Second)
+		}
+		if err := lifecycle.LoadAllFromRepo(cfg.ModelRepoPath); err != nil {
+			log.Printf("warning: failed to load models from repo: %v", err)
+		}
+		log.Print("model loading complete")
 	}()
 
 	quit := make(chan os.Signal, 1)

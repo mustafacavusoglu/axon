@@ -197,12 +197,142 @@ CONVERTERS = {
 
 
 # ---------------------------------------------------------------------------
+# ONNX wrapper: flat input → individual named feature inputs
+# ---------------------------------------------------------------------------
+
+def wrap_onnx_with_named_inputs(
+    onnx_path: Path,
+    feature_names: List[str],
+) -> None:
+    """
+    Rewrite an ONNX model so that instead of a single flat input [None, N],
+    it accepts N individual named scalar inputs, one per feature.
+
+    The wrapper inserts a Concat node that merges them back into the original
+    flat tensor before passing to the core model.
+    """
+    import onnx
+    from onnx import helper, numpy_helper
+
+    original = onnx.load(str(onnx_path))
+    graph = original.graph
+    n = len(feature_names)
+
+    # --- Find the original single input ---
+    if len(graph.input) < 1:
+        print("  [wrap] Warning: model has no inputs, skipping wrap")
+        return
+
+    orig_input = graph.input[0]
+    orig_input_name = orig_input.name
+
+    # --- Create N individual scalar inputs ---
+    new_inputs = []
+    concat_input_names = []
+    for i, fname in enumerate(feature_names):
+        safe_name = fname.replace(" ", "_").replace("-", "_")
+        new_inp = helper.make_tensor_value_info(safe_name, onnx.TensorProto.FLOAT, [1])
+        new_inputs.append(new_inp)
+        concat_input_names.append(safe_name)
+
+    # --- Determine if Unsqueeze uses axes as input (opset ≥ 13) or attribute ---
+    std_opset = 9  # default fallback
+    for op in original.opset_import:
+        if op.domain == "":
+            std_opset = max(std_opset, op.version)
+    use_input_axes = std_opset >= 13
+
+    # --- Create Concat node: merge [N x [1]] → [1, N] ---
+    unsqueeze_names = []
+    unsqueeze_nodes = []
+    for i, cin in enumerate(concat_input_names):
+        us_name = f"{cin}_unsqueeze"
+        if use_input_axes:
+            # opset ≥ 13: axes as second input
+            axes_init = numpy_helper.from_array(np.array([0], dtype=np.int64), name=f"{cin}_axes")
+            graph.initializer.append(axes_init)
+            unsqueeze_nodes.append(
+                helper.make_node(
+                    "Unsqueeze",
+                    inputs=[cin, f"{cin}_axes"],
+                    outputs=[us_name],
+                    name=f"Unsqueeze_{cin}",
+                )
+            )
+        else:
+            # opset < 13: axes as attribute
+            unsqueeze_nodes.append(
+                helper.make_node(
+                    "Unsqueeze",
+                    inputs=[cin],
+                    outputs=[us_name],
+                    name=f"Unsqueeze_{cin}",
+                    axes=[0],
+                )
+            )
+        unsqueeze_names.append(us_name)
+
+    # Concat along axis=1 → shape [1, N]
+    concat_node = helper.make_node(
+        "Concat",
+        inputs=unsqueeze_names,
+        outputs=[f"{orig_input_name}_wrapped"],
+        name="Concat_features",
+        axis=1,
+    )
+
+    # --- Rewire graph: replace original input references ---
+    # Keep all original nodes, but replace old_input_name with wrapped name
+    new_nodes = list(unsqueeze_nodes) + [concat_node]
+    for node in graph.node:
+        new_node = helper.make_node(
+            node.op_type,
+            inputs=[f"{orig_input_name}_wrapped" if inp == orig_input_name else inp for inp in node.input],
+            outputs=list(node.output),
+            name=node.name,
+            domain=node.domain,  # preserve domain (e.g. ai.onnx.ml)
+            **{a.name: helper.get_attribute_value(a) for a in node.attribute},
+        )
+        new_nodes.append(new_node)
+
+    # --- Build new graph: individual inputs + original outputs ---
+    new_graph = helper.make_graph(
+        nodes=new_nodes,
+        name=f"{graph.name}_wrapped",
+        inputs=new_inputs,
+        outputs=list(graph.output),
+        initializer=list(graph.initializer),
+    )
+
+    # --- Set opset imports (preserve originals, ensure standard domain exists) ---
+    seen_domains: dict = {}
+    for op in original.opset_import:
+        if op.domain not in seen_domains or op.version > seen_domains[op.domain]:
+            seen_domains[op.domain] = op.version
+    # Ensure standard domain '' is present (Unsqueeze/Concat need it)
+    if "" not in seen_domains:
+        seen_domains[""] = 11
+
+    opset_imports = [helper.make_opsetid(d, v) for d, v in seen_domains.items()]
+
+    new_model = helper.make_model(
+        new_graph,
+        producer_name="convert_to_onnx",
+        opset_imports=opset_imports,
+    )
+    new_model.ir_version = original.ir_version
+
+    onnx.save(new_model, str(onnx_path))
+    print(f"  [wrap] {n} individual feature inputs → {onnx_path}")
+
+
+# ---------------------------------------------------------------------------
 # config.pbtxt generation (Triton)
 # ---------------------------------------------------------------------------
 
 def _task_from_name(name: str) -> str:
-    """Heuristic: 'breast_cancer', 'classification' → classification, else regression."""
-    classification_keywords = ["breast_cancer", "classification"]
+    """Heuristic: detect classification vs regression from dataset name."""
+    classification_keywords = ["breast_cancer", "classification", "credit_risk"]
     for kw in classification_keywords:
         if kw in name.lower():
             return "classification"
@@ -237,44 +367,34 @@ def generate_config_pbtxt(
     model_name: str,
     feature_names: List[str],
     task: str,
-    max_batch_size: int = 32,
+    max_batch_size: int = 8,
 ) -> str:
-    """Generate Triton config.pbtxt content with explicit input feature schema."""
+    """Generate Triton config.pbtxt with each feature as a named input."""
 
-    n = len(feature_names)
+    # Build individual feature input entries
+    input_entries: List[str] = []
+    for fn in feature_names:
+        safe_name = fn.replace(" ", "_").replace("-", "_")
+        input_entries.append(
+            f"  {{\n"
+            f"    name: \"{safe_name}\"\n"
+            f"    data_type: TYPE_FP32\n"
+            f"    dims: [ 1 ]\n"
+            f"  }}"
+        )
 
-    # Build the input schema table showing exact column→feature mapping
-    schema_lines = []
-    schema_lines.append(f"# │  col │ name{'':21s} │ dtype     │")
-    schema_lines.append(f"# ├──────┼{'─'*24}┼───────────┤")
-    for i, fn in enumerate(feature_names):
-        schema_lines.append(f"# │ {i:4d} │ {fn:22s} │ TYPE_FP32 │")
-    schema_lines.append(f"#")
-    schema_lines.append(f"#   Total: {n} features, passed as a flat float32 array shape [1, {n}]")
-
-    input_schema_block = "\n".join(schema_lines)
+    inputs_block = ",\n".join(input_entries)
 
     config = f"""# Triton Inference Server model configuration
 # Auto-generated — model: {model_name}
 
 name: "{model_name}"
 platform: "onnxruntime_onnx"
-
 max_batch_size: {max_batch_size}
 
-# ── Input schema ───────────────────────────────────────
-# The ONNX model expects a single tensor "input" with all
-# features concatenated in the exact order below:
-#
-{input_schema_block}
-
-# ── Input ──────────────────────────────────────────────
+# ── Input: {len(feature_names)} features ──────────────────────
 input [
-    {{
-      name: "input"
-      data_type: TYPE_FP32
-      dims: [ {n} ]
-    }}
+{inputs_block}
 ]
 
 # ── Output ─────────────────────────────────────────────
@@ -332,11 +452,14 @@ def convert_one(pkl_path: Path, n_features: Optional[int], model_name: Optional[
     version_dir.mkdir(parents=True, exist_ok=True)
     onnx_path = version_dir / "model.onnx"
 
-    # 5. Convert
+    # 5. Convert to ONNX (flat input)
     converter = CONVERTERS[model_type]
     converter(model, n_features, onnx_path)
 
-    # 6. config.pbtxt
+    # 6. Wrap: flat input → individual named feature inputs
+    wrap_onnx_with_named_inputs(onnx_path, feature_names)
+
+    # 7. config.pbtxt (with per-feature inputs)
     config = generate_config_pbtxt(model_name, feature_names, task)
     config_path = REPO_DIR / model_name / "config.pbtxt"
     config_path.write_text(config)

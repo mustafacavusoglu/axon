@@ -26,6 +26,7 @@ fn model_key(name: &str, version: u32) -> String {
     format!("{}@v{}", name, version)
 }
 
+#[derive(Clone)]
 pub struct SessionPool {
     sessions: Arc<DashMap<String, Arc<ModelSession>>>,
 }
@@ -45,7 +46,7 @@ impl SessionPool {
         })
     }
 
-    pub async fn load_model(
+    pub fn load_model(
         &self,
         name: &str,
         version: u32,
