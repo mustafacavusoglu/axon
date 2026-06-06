@@ -1,0 +1,15 @@
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: inference-server
+  labels:
+    release: prometheus
+    app: inference-server
+spec:
+  selector:
+    matchLabels:
+      app: inference-server
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

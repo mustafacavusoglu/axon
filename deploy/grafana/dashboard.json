@@ -1,0 +1,94 @@
+{
+  "dashboard": {
+    "title": "Axon Inference Server",
+    "uid": "axon-inference",
+    "panels": [
+      {
+        "title": "Inference Rate",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "rate(inference_requests_total[1m])",
+            "legendFormat": "{{model}} ({{status}})"
+          }
+        ]
+      },
+      {
+        "title": "Inference Latency (ms)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.50, rate(inference_latency_ms_bucket[1m]))",
+            "legendFormat": "p50 {{model}}"
+          },
+          {
+            "expr": "histogram_quantile(0.95, rate(inference_latency_ms_bucket[1m]))",
+            "legendFormat": "p95 {{model}}"
+          },
+          {
+            "expr": "histogram_quantile(0.99, rate(inference_latency_ms_bucket[1m]))",
+            "legendFormat": "p99 {{model}}"
+          }
+        ]
+      },
+      {
+        "title": "Engine Latency (ms)",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "histogram_quantile(0.95, rate(inference_engine_latency_ms_bucket[1m]))",
+            "legendFormat": "p95 {{model}}"
+          }
+        ]
+      },
+      {
+        "title": "Queue Depth",
+        "type": "graph",
+        "targets": [
+          {
+            "expr": "inference_queue_depth",
+            "legendFormat": "{{model}}"
+          }
+        ]
+      },
+      {
+        "title": "Batch Size Distribution",
+        "type": "heatmap",
+        "targets": [
+          {
+            "expr": "rate(inference_batch_size_bucket[1m])",
+            "legendFormat": "{{le}}"
+          }
+        ]
+      },
+      {
+        "title": "Models Loaded",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "inference_engine_models_loaded"
+          }
+        ]
+      },
+      {
+        "title": "Model Load Events",
+        "type": "stat",
+        "targets": [
+          {
+            "expr": "sum(rate(model_load_total[5m])) by (status)",
+            "legendFormat": "{{status}}"
+          }
+        ]
+      }
+    ],
+    "templating": {
+      "list": [
+        {
+          "name": "model",
+          "type": "query",
+          "query": "label_values(inference_requests_total, model)"
+        }
+      ]
+    }
+  }
+}
