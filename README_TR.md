@@ -2,25 +2,38 @@
 
 > [English documentation](README.md)
 
-Triton uyumlu, CPU öncelikli model sunum altyapısı.  
-**Control Plane:** Go · **Inference Engine:** Rust  
-**İletişim:** gRPC + HTTP/REST (KServe v2)  
+Tek binary, Triton uyumlu, CPU oncelikli model sunum sistemi.  
+**Dil:** Rust  
+**Iletisim:** gRPC + HTTP/REST (KServe v2)  
 **Runtime:** ONNX Runtime  
-**Hedef:** Kubernetes
+**Hedef:** Kubernetes / Docker / Bare-metal
 
 ---
 
-## Hızlı Başlangıç
+## Hizli Baslangic
 
-### Lokal
+### Binary
 ```bash
-# Gereksinimler: Rust, Go, ONNX Runtime (brew install onnxruntime)
-./run.sh
+axon-server \
+  --model-repository=/models \
+  --model-control-mode=poll \
+  --repository-poll-secs=30 \
+  --http-port=8000 \
+  --grpc-port=8001 \
+  --metrics-port=8002
 ```
 
 ### Docker
 ```bash
-docker-compose up --build
+docker run -v ./models:/models -p 8000:8000 -p 8001:8001 -p 8002:8002 \
+  mustdo12/axon-server:0.2.0 \
+  --model-repository=/models \
+  --model-control-mode=poll
+```
+
+### Docker Compose
+```bash
+docker-compose up
 ```
 
 ### Kubernetes
@@ -28,102 +41,193 @@ docker-compose up --build
 kubectl apply -f deploy/k8s/
 ```
 
-Sunucuya istek at:
+Saglik kontrolu:
 ```bash
-curl http://localhost:8080/v2/health/live
-curl http://localhost:8080/v2/models
+curl http://localhost:8000/v2/health/live
+curl http://localhost:8000/v2/health/ready
 ```
+
+---
+
+## CLI Parametreleri
+
+| Parametre | Varsayilan | Aciklama |
+|-----------|-----------|----------|
+| `--model-repository` | `/models` | Model deposu yolu |
+| `--model-control-mode` | `none` | `none` veya `poll` |
+| `--repository-poll-secs` | `30` | Polling araligi (mode=poll iken) |
+| `--http-port` | `8000` | HTTP/REST API portu |
+| `--grpc-port` | `8001` | gRPC API portu |
+| `--metrics-port` | `8002` | Prometheus metrics portu |
+| `--inference-timeout-ms` | `30000` | Istek basi timeout |
+| `--num-threads` | `0` (otomatik) | Worker thread sayisi (0 = CPU sayisi) |
+| `--concurrency-per-model` | `4` | Model basi maks esanli inference |
 
 ---
 
 ## Mimari
 
 ```
-┌──────────────────────────────────────────┐
-│              Kubernetes Pod              │
-│                                          │
-│  ┌────────────┐  ┌───────────────────┐   │
-│  │ Go CP      │  │ Rust Engine       │   │
-│  │ :8080 HTTP │  │ :unix socket      │   │
-│  │ :8001 gRPC │──│ ONNX Runtime      │   │
-│  └────────────┘  └───────────────────┘   │
-│         │                  │             │
-│         └──── /models ─────┘             │
-└──────────────────────────────────────────┘
+┌─────────────────────────────────────────────┐
+│            axon-server (tek binary)         │
+│                                             │
+│  ┌──────────┐  ┌──────────┐  ┌──────────┐  │
+│  │ HTTP API │  │ gRPC API │  │ Metrics  │  │
+│  │ :8000    │  │ :8001    │  │ :8002    │  │
+│  └────┬─────┘  └────┬─────┘  └──────────┘  │
+│       │              │                      │
+│       └──────┬───────┘                      │
+│              ▼                              │
+│  ┌─────────────────────────────┐            │
+│  │     Session Pool            │            │
+│  │  ONNX Runtime (CPU)        │            │
+│  │  model basi concurrency    │            │
+│  └─────────────────────────────┘            │
+│              │                              │
+│              ▼                              │
+│  ┌─────────────────────────────┐            │
+│  │    Model Repository         │            │
+│  │    /models/<isim>/<ver>/    │            │
+│  └─────────────────────────────┘            │
+└─────────────────────────────────────────────┘
 ```
-
-| Bileşen | Dil | Görev |
-|---------|-----|-------|
-| Control Plane | Go | API, model kaydı, batch, sağlık kontrolü |
-| Inference Engine | Rust | ONNX Runtime oturumları, tensor çalıştırma |
-| IPC | gRPC (Unix socket) | Go ↔ Rust iletişimi |
 
 ---
 
-## Inference
+## HTTP API (KServe v2)
 
-Hazır curl komutları için [sample-request.md](sample-request.md) dosyasına bak.
+| Metot | Endpoint | Aciklama |
+|-------|----------|----------|
+| GET | `/v2/health/live` | Liveness probe |
+| GET | `/v2/health/ready` | Readiness probe |
+| GET | `/v2` | Sunucu metadata |
+| GET | `/v2/models` | Yuklu modelleri listele |
+| GET | `/v2/models/{isim}` | Model metadata |
+| GET | `/v2/models/{isim}/versions/{ver}` | Versiyon metadata |
+| POST | `/v2/models/{isim}/infer` | Inference (son versiyon) |
+| POST | `/v2/models/{isim}/versions/{ver}/infer` | Inference (belirli versiyon) |
+| POST | `/v2/models/{isim}/load` | Model yukle |
+| POST | `/v2/models/{isim}/unload` | Model kaldir |
+| POST | `/v2/repository/index` | Depo indeksi |
 
+### Inference Ornegi
 ```bash
-curl -s -X POST http://localhost:8080/v2/models/lgbm_credit_risk/infer \
+curl -s -X POST http://localhost:8000/v2/models/lgbm_credit_risk/infer \
   -H 'Content-Type: application/json' \
-  -d '{"inputs":[
-    {"name":"age","shape":[1],"datatype":"FP32","data":[25.0]},
-    {"name":"bmi","shape":[1],"datatype":"FP32","data":[22.5]}
-  ]}'
+  -d '{
+    "inputs": [
+      {"name": "features", "shape": [1, 30], "datatype": "FP32", "data": [1.0, 2.0, ...]}
+    ]
+  }'
 ```
 
-Yanıt (KServe v2):
+Yanit:
 ```json
 {
+  "id": "",
+  "model_name": "lgbm_credit_risk",
+  "model_version": "1",
   "outputs": [
-    {"name": "label",         "datatype": "INT64", "shape": [1],    "data": [1]},
-    {"name": "probabilities", "datatype": "FP32",  "shape": [1, 2], "data": [0.23, 0.77]}
+    {"name": "label", "datatype": "INT64", "shape": [1], "data": [1]},
+    {"name": "probabilities", "datatype": "FP32", "shape": [1, 2], "data": [0.23, 0.77]}
   ]
 }
 ```
 
 ---
 
+## gRPC API
+
+KServe uyumlu `GRPCInferenceService`:
+- `ServerLive` / `ServerReady` / `ModelReady`
+- `ServerMetadata` / `ModelMetadata`
+- `ModelInfer`
+
+Port 8001 uzerinden KServe proto tanimlariyla baglanin.
+
+---
+
 ## Model Deposu
 
-Triton uyumlu dizin yapısı:
+Triton uyumlu dizin yapisi:
 ```
 /models/
-└── benim-modelim/
+├── benim-modelim/
+│   ├── config.pbtxt
+│   ├── 1/
+│   │   └── model.onnx
+│   └── 2/
+│       └── model.onnx
+└── diger-model/
     ├── config.pbtxt
     └── 1/
         └── model.onnx
 ```
 
----
+### config.pbtxt
+```
+name: "benim-modelim"
+platform: "onnxruntime_onnx"
+max_batch_size: 8
 
-## Geliştirme
+input {
+  name: "features"
+  data_type: TYPE_FP32
+  dims: [30]
+}
 
-```bash
-make build        # İkisini de derle
-make test         # Tüm testleri çalıştır
-make proto        # Protobuf kodunu yeniden üret (buf)
+output {
+  name: "probabilities"
+  data_type: TYPE_FP32
+  dims: [2]
+}
+
+instance_group {
+  count: 4
+  kind: "KIND_CPU"
+}
 ```
 
 ---
 
-## Sıradaki Özellikler
+## Metrikler
 
-- Dynamic batching — modele özel istekleri biriktirip toplu işleme
-- Ensemble pipelines — modelleri zincirleme (A çıktısı → B girdisi)
-- OpenVINO backend — Intel CPU optimizasyonu
-- Model warmup — ilk yüklemede ONNX oturumlarını ısıtma
-- Authentication — API key + mTLS
-- Binary tensor extension — büyük veriler için raw bytes
-- Graceful rolling update — sıfır istek kaybıyla yeniden başlatma
-- Rate limiting middleware
-- Model A/B traffic splitting
-- LRU eviction — bellek baskısında en az kullanılan modeli kaldırma
-- FSWatcher — model dosyası değişikliklerinde otomatik yeniden yükleme
-- Swagger UI — OpenAPI 3.0 tarayıcı tabanlı dökümantasyon
-- Distributed trace propagation — Go ↔ Rust span bağlantısı
-- NUMA-aware session pools — çok soketli sunucu optimizasyonu
+Prometheus metrikleri `:8002/metrics` uzerinde:
+- `axon_requests_total` — Toplam inference istegi
+- `axon_models_loaded` — Yuklu model sayisi
+- `axon_inference_latency_ms{model="..."}` — Model basi latency histogrami
 
 ---
 
+## Gelistirme
+
+```bash
+# Derleme
+cd inference-engine && cargo build --release
+
+# Lokal calistirma
+ORT_DYLIB_PATH=/path/to/libonnxruntime.dylib \
+  ./target/release/axon-server --model-repository=./local_models/model_repository
+
+# Test
+cargo test
+```
+
+---
+
+## Siradaki Ozellikler
+
+- Dynamic batching — modele ozel istekleri biriktirip toplu isleme
+- Ensemble pipelines — modelleri zincirleme (A ciktisi -> B girdisi)
+- OpenVINO backend — Intel CPU optimizasyonu
+- Model warmup — ilk yuklemede ONNX oturumlarini isitma
+- Authentication — API key + mTLS
+- Binary tensor extension — buyuk veriler icin raw bytes
+- Graceful rolling update — sifir istek kaybiyla yeniden baslatma
+- Rate limiting middleware
+- Model A/B traffic splitting
+- LRU eviction — bellek baskisinda en az kullanilan modeli kaldirma
+- Swagger UI — OpenAPI 3.0 tarayici tabanli dokumantasyon
+- NUMA-aware session pools — cok soketli sunucu optimizasyonu
+
+---
