@@ -10,6 +10,17 @@ pub mod config_parser;
 pub use config_parser::ModelConfig;
 
 pub async fn load_all_models(repo_path: &Path, pool: &SessionPool) {
+    let repo = repo_path.to_path_buf();
+    let pool = pool.clone();
+
+    let result = tokio::task::spawn_blocking(move || load_all_models_sync(&repo, &pool)).await;
+
+    if let Err(e) = result {
+        tracing::error!(error = %e, "model loading task panicked");
+    }
+}
+
+fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
     if !repo_path.is_dir() {
         tracing::warn!(path = %repo_path.display(), "model repository not found");
         return;

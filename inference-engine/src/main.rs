@@ -1,4 +1,3 @@
-mod arena;
 mod config;
 mod grpc_server;
 mod http_server;
@@ -64,16 +63,19 @@ fn main() -> anyhow::Result<()> {
             .init();
     }
 
-    let worker_threads = if config.num_threads > 0 {
+    let inference_threads = if config.num_threads > 0 {
         config.num_threads
     } else {
         num_cpus::get_physical()
     };
 
-    let pool = SessionPool::new(worker_threads)?;
+    // Tokio handles async IO only — needs far fewer threads than inference
+    let tokio_threads = (inference_threads / 2).max(2).min(8);
+
+    let pool = SessionPool::new(inference_threads)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(worker_threads)
+        .worker_threads(tokio_threads)
         .enable_all()
         .build()?;
 
@@ -86,7 +88,8 @@ fn main() -> anyhow::Result<()> {
             grpc_port = config.grpc_port,
             metrics_port = config.metrics_port,
             model_control_mode = %config.model_control_mode,
-            threads = worker_threads,
+            inference_threads = inference_threads,
+            tokio_threads = tokio_threads,
             "starting axon-server"
         );
 

@@ -282,19 +282,28 @@ async fn run_inference(
     req: InferRequest,
 ) -> Result<impl IntoResponse, StatusCode> {
     let _permit = session
-        .concurrency
+        .concurrency()
         .acquire()
         .await
         .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
 
-    let inputs = parse_http_inputs(&req.inputs).map_err(|_| StatusCode::BAD_REQUEST)?;
+    let inputs = parse_http_inputs(&req.inputs).map_err(|e| {
+        tracing::warn!(error = %e, "bad request");
+        StatusCode::BAD_REQUEST
+    })?;
 
     let start = Instant::now();
     let runner = session.runner.clone();
     let outputs = tokio::task::spawn_blocking(move || runner.run(inputs))
         .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+        .map_err(|e| {
+            tracing::error!(error = %e, "spawn_blocking failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?
+        .map_err(|e| {
+            tracing::error!(error = %e, "inference failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
 
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
     metrics::inc_requests();

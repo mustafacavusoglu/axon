@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
 use anyhow::Context;
@@ -11,16 +10,19 @@ use crate::session::runner::ModelRunner;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
     Ready,
-    Error,
 }
 
 pub struct ModelSession {
     pub name: String,
     pub version: u32,
     pub state: SessionState,
-    pub memory_bytes: AtomicU64,
     pub runner: Arc<ModelRunner>,
-    pub concurrency: Arc<Semaphore>,
+}
+
+impl ModelSession {
+    pub fn concurrency(&self) -> &Arc<Semaphore> {
+        self.runner.concurrency_semaphore()
+    }
 }
 
 fn model_key(name: &str, version: u32) -> String {
@@ -66,24 +68,23 @@ impl SessionPool {
             anyhow::bail!("model file not found: {}", model_path.display());
         }
 
-        let runner = ModelRunner::load(model_path)?;
-
         let count = if concurrency > 0 {
             concurrency as usize
         } else {
             4
         };
+
+        let runner = ModelRunner::load(model_path, count)?;
+
         let session = Arc::new(ModelSession {
             name: name.to_string(),
             version,
             state: SessionState::Ready,
-            memory_bytes: AtomicU64::new(0),
             runner: Arc::new(runner),
-            concurrency: Arc::new(Semaphore::new(count)),
         });
 
         self.sessions.insert(key, session.clone());
-        tracing::info!(name, version, "model loaded");
+        tracing::info!(name, version, instances = count, "model loaded");
         Ok(session)
     }
 

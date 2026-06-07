@@ -1,9 +1,11 @@
 use std::collections::HashMap;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use ort::session::{builder::GraphOptimizationLevel, Session};
 use ort::value::{Tensor, Value};
 use parking_lot::Mutex;
+use tokio::sync::Semaphore;
 
 pub enum InputTensor {
     F32(Vec<f32>, Vec<usize>),
@@ -55,15 +57,35 @@ impl TensorData {
 }
 
 pub struct ModelRunner {
-    session: Mutex<Session>,
+    sessions: Vec<Mutex<Session>>,
+    semaphore: Arc<Semaphore>,
+    model_path: PathBuf,
 }
 
 impl ModelRunner {
-    pub fn load(model_path: &Path) -> anyhow::Result<Self> {
+    pub fn load(model_path: &Path, concurrency: usize) -> anyhow::Result<Self> {
+        let count = concurrency.max(1);
+        let mut sessions = Vec::with_capacity(count);
+
+        for _ in 0..count {
+            let session = Self::create_session(model_path)?;
+            sessions.push(Mutex::new(session));
+        }
+
+        tracing::info!(path = %model_path.display(), instances = count, "ONNX sessions created");
+
+        Ok(Self {
+            sessions,
+            semaphore: Arc::new(Semaphore::new(count)),
+            model_path: model_path.to_path_buf(),
+        })
+    }
+
+    fn create_session(model_path: &Path) -> anyhow::Result<Session> {
         let builder = Session::builder()
             .map_err(|e| anyhow::anyhow!("failed to create session builder: {}", e))?;
 
-        let session = builder
+        builder
             .with_optimization_level(GraphOptimizationLevel::Level3)
             .map_err(|e| anyhow::anyhow!("failed to set optimization level: {}", e))?
             .with_intra_threads(1)
@@ -71,13 +93,11 @@ impl ModelRunner {
             .commit_from_file(model_path)
             .map_err(|e| {
                 anyhow::anyhow!("failed to load ONNX model {}: {}", model_path.display(), e)
-            })?;
+            })
+    }
 
-        tracing::info!(path = %model_path.display(), "ONNX session created");
-
-        Ok(Self {
-            session: Mutex::new(session),
-        })
+    pub fn concurrency_semaphore(&self) -> &Arc<Semaphore> {
+        &self.semaphore
     }
 
     pub fn run(
@@ -121,7 +141,17 @@ impl ModelRunner {
             session_inputs.insert(name, value);
         }
 
-        let mut session = self.session.lock();
+        // Find an available session (round-robin via try_lock)
+        let mut session_guard = None;
+        for s in &self.sessions {
+            if let Some(guard) = s.try_lock() {
+                session_guard = Some(guard);
+                break;
+            }
+        }
+        // Fallback: block on first session if all are busy
+        let mut session = session_guard.unwrap_or_else(|| self.sessions[0].lock());
+
         let outputs = session
             .run(session_inputs)
             .map_err(|e| anyhow::anyhow!("inference failed: {}", e))?;

@@ -167,7 +167,7 @@ impl GrpcInferenceService for KfsService {
         })?;
 
         let _permit = session
-            .concurrency
+            .concurrency()
             .acquire()
             .await
             .map_err(|_| Status::resource_exhausted("concurrency limit"))?;
