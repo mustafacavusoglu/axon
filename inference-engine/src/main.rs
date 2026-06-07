@@ -113,11 +113,13 @@ fn main() -> anyhow::Result<()> {
         let http_handle = {
             let http_pool = pool.clone();
             let http_repo = config.model_repository.clone();
+            let timeout_ms = config.inference_timeout_ms;
             let rx = shutdown_rx.clone();
             tokio::spawn(http_server::serve(
                 config.http_port,
                 http_pool,
                 http_repo,
+                timeout_ms,
                 rx,
             ))
         };
@@ -125,11 +127,13 @@ fn main() -> anyhow::Result<()> {
         let grpc_handle = {
             let grpc_pool = pool.clone();
             let grpc_repo = config.model_repository.clone();
+            let timeout_ms = config.inference_timeout_ms;
             let rx = shutdown_rx.clone();
             tokio::spawn(grpc_server::serve(
                 config.grpc_port,
                 grpc_pool,
                 grpc_repo,
+                timeout_ms,
                 rx,
             ))
         };

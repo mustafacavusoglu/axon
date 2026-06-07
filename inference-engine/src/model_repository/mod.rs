@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -6,8 +7,17 @@ use tokio::sync::watch;
 use crate::metrics;
 use crate::session::pool::SessionPool;
 
+pub mod circuit_breaker;
 pub mod config_parser;
 pub use config_parser::ModelConfig;
+
+use circuit_breaker::CircuitBreaker;
+
+static CIRCUIT_BREAKER: std::sync::OnceLock<Mutex<CircuitBreaker>> = std::sync::OnceLock::new();
+
+fn get_circuit_breaker() -> &'static Mutex<CircuitBreaker> {
+    CIRCUIT_BREAKER.get_or_init(|| Mutex::new(CircuitBreaker::new()))
+}
 
 pub async fn load_all_models(repo_path: &Path, pool: &SessionPool) {
     let repo = repo_path.to_path_buf();
@@ -64,6 +74,15 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
         }
 
         for version in versions {
+            let cb_key = format!("{}@v{}", model_name, version);
+
+            if let Ok(cb) = get_circuit_breaker().lock() {
+                if cb.is_open(&cb_key) {
+                    tracing::debug!(model = %model_name, version, "circuit open, skipping");
+                    continue;
+                }
+            }
+
             let model_file = model_dir.join(version.to_string()).join("model.onnx");
             if !model_file.exists() {
                 tracing::warn!(model = %model_name, version, "model.onnx not found, skipping");
@@ -71,9 +90,16 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
             }
 
             match pool.load_model(&model_name, version, &model_file, concurrency) {
-                Ok(_) => {}
+                Ok(_) => {
+                    if let Ok(mut cb) = get_circuit_breaker().lock() {
+                        cb.record_success(&cb_key);
+                    }
+                }
                 Err(e) => {
                     tracing::error!(model = %model_name, version, error = %e, "failed to load model");
+                    if let Ok(mut cb) = get_circuit_breaker().lock() {
+                        cb.record_failure(&cb_key);
+                    }
                 }
             }
         }

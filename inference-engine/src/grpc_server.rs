@@ -24,19 +24,20 @@ use kfs::{
 struct KfsService {
     pool: SessionPool,
     repo_path: PathBuf,
-    start_time: Instant,
+    inference_timeout: std::time::Duration,
 }
 
 pub async fn serve(
     port: u16,
     pool: SessionPool,
     repo_path: PathBuf,
+    inference_timeout_ms: u64,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let svc = KfsService {
         pool,
         repo_path,
-        start_time: Instant::now(),
+        inference_timeout: std::time::Duration::from_millis(inference_timeout_ms),
     };
 
     let addr = format!("0.0.0.0:{}", port).parse().unwrap();
@@ -176,8 +177,13 @@ impl GrpcInferenceService for KfsService {
 
         let start = Instant::now();
         let runner = session.runner.clone();
-        let outputs = tokio::task::spawn_blocking(move || runner.run(inputs))
+        let infer_future = tokio::task::spawn_blocking(move || runner.run(inputs));
+
+        let outputs = tokio::time::timeout(self.inference_timeout, infer_future)
             .await
+            .map_err(|_| Status::deadline_exceeded(format!(
+                "inference timed out after {}ms", self.inference_timeout.as_millis()
+            )))?
             .map_err(|e| Status::internal(format!("task join error: {}", e)))?
             .map_err(|e| Status::internal(format!("inference error: {}", e)))?;
 

@@ -18,19 +18,20 @@ use crate::session::runner::InputTensor;
 struct AppState {
     pool: SessionPool,
     repo_path: PathBuf,
-    start_time: Instant,
+    inference_timeout: std::time::Duration,
 }
 
 pub async fn serve(
     port: u16,
     pool: SessionPool,
     repo_path: PathBuf,
+    inference_timeout_ms: u64,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let state = Arc::new(AppState {
         pool,
         repo_path,
-        start_time: Instant::now(),
+        inference_timeout: std::time::Duration::from_millis(inference_timeout_ms),
     });
 
     let app = Router::new()
@@ -276,7 +277,7 @@ async fn infer_version(
 }
 
 async fn run_inference(
-    _state: Arc<AppState>,
+    state: Arc<AppState>,
     session: std::sync::Arc<crate::session::pool::ModelSession>,
     model_name: String,
     req: InferRequest,
@@ -294,8 +295,14 @@ async fn run_inference(
 
     let start = Instant::now();
     let runner = session.runner.clone();
-    let outputs = tokio::task::spawn_blocking(move || runner.run(inputs))
+    let infer_future = tokio::task::spawn_blocking(move || runner.run(inputs));
+
+    let outputs = tokio::time::timeout(state.inference_timeout, infer_future)
         .await
+        .map_err(|_| {
+            tracing::warn!(model = %model_name, timeout_ms = state.inference_timeout.as_millis(), "inference timed out");
+            StatusCode::GATEWAY_TIMEOUT
+        })?
         .map_err(|e| {
             tracing::error!(error = %e, "spawn_blocking failed");
             StatusCode::INTERNAL_SERVER_ERROR
