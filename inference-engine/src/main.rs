@@ -90,6 +90,7 @@ fn main() -> anyhow::Result<()> {
             "starting axon-server"
         );
 
+        metrics::init();
         model_repository::load_all_models(&config.model_repository, &pool).await;
         metrics::set_models_count(pool.model_count() as i64);
 

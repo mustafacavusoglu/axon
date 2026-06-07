@@ -67,15 +67,15 @@ pub async fn serve(
         .ok();
 }
 
-async fn health_live() -> StatusCode {
-    StatusCode::OK
+async fn health_live() -> Json<serde_json::Value> {
+    Json(serde_json::json!({"live": true}))
 }
 
-async fn health_ready(State(state): State<Arc<AppState>>) -> StatusCode {
+async fn health_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if state.pool.model_count() > 0 {
-        StatusCode::OK
+        (StatusCode::OK, Json(serde_json::json!({"ready": true})))
     } else {
-        StatusCode::SERVICE_UNAVAILABLE
+        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"ready": false})))
     }
 }
 

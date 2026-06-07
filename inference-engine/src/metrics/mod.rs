@@ -43,6 +43,10 @@ fn registry() -> &'static Registry {
     })
 }
 
+pub fn init() {
+    registry();
+}
+
 pub fn inc_requests() {
     if let Some(c) = INFER_REQUESTS.get() {
         c.inc();
