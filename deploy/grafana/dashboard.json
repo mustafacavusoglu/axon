@@ -1,94 +1,136 @@
 {
-  "dashboard": {
-    "title": "Axon Inference Server",
-    "uid": "axon-inference",
-    "panels": [
+  "title": "Axon Inference Server",
+  "uid": "axon-inference",
+  "tags": ["axon", "inference"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "templating": {
+    "list": [
       {
-        "title": "Inference Rate",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "rate(inference_requests_total[1m])",
-            "legendFormat": "{{model}} ({{status}})"
-          }
-        ]
-      },
-      {
-        "title": "Inference Latency (ms)",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.50, rate(inference_latency_ms_bucket[1m]))",
-            "legendFormat": "p50 {{model}}"
-          },
-          {
-            "expr": "histogram_quantile(0.95, rate(inference_latency_ms_bucket[1m]))",
-            "legendFormat": "p95 {{model}}"
-          },
-          {
-            "expr": "histogram_quantile(0.99, rate(inference_latency_ms_bucket[1m]))",
-            "legendFormat": "p99 {{model}}"
-          }
-        ]
-      },
-      {
-        "title": "Engine Latency (ms)",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "histogram_quantile(0.95, rate(inference_engine_latency_ms_bucket[1m]))",
-            "legendFormat": "p95 {{model}}"
-          }
-        ]
-      },
-      {
-        "title": "Queue Depth",
-        "type": "graph",
-        "targets": [
-          {
-            "expr": "inference_queue_depth",
-            "legendFormat": "{{model}}"
-          }
-        ]
-      },
-      {
-        "title": "Batch Size Distribution",
-        "type": "heatmap",
-        "targets": [
-          {
-            "expr": "rate(inference_batch_size_bucket[1m])",
-            "legendFormat": "{{le}}"
-          }
-        ]
-      },
-      {
-        "title": "Models Loaded",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "inference_engine_models_loaded"
-          }
-        ]
-      },
-      {
-        "title": "Model Load Events",
-        "type": "stat",
-        "targets": [
-          {
-            "expr": "sum(rate(model_load_total[5m])) by (status)",
-            "legendFormat": "{{status}}"
-          }
+        "name": "model",
+        "type": "query",
+        "datasource": "Prometheus",
+        "query": "label_values(axon_requests_total, model)",
+        "refresh": 2,
+        "multi": true,
+        "includeAll": true
+      }
+    ]
+  },
+  "panels": [
+    {
+      "title": "Models Loaded",
+      "type": "stat",
+      "gridPos": {"x": 0, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "axon_models_loaded", "legendFormat": "models"}],
+      "fieldConfig": {"defaults": {"thresholds": {"steps": [{"value": 0, "color": "red"}, {"value": 1, "color": "orange"}, {"value": 3, "color": "green"}]}}}
+    },
+    {
+      "title": "Total Requests",
+      "type": "stat",
+      "gridPos": {"x": 4, "y": 0, "w": 4, "h": 4},
+      "targets": [{"expr": "sum(axon_requests_total{model=~\"$model\"})", "legendFormat": "requests"}]
+    },
+    {
+      "title": "Success Rate (200)",
+      "type": "stat",
+      "gridPos": {"x": 8, "y": 0, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "sum(rate(axon_requests_total{model=~\"$model\",status=\"200\"}[1m])) / sum(rate(axon_requests_total{model=~\"$model\"}[1m])) * 100", "legendFormat": "%"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "percent", "thresholds": {"steps": [{"value": 0, "color": "red"}, {"value": 95, "color": "orange"}, {"value": 99, "color": "green"}]}}}
+    },
+    {
+      "title": "Avg Latency (ms)",
+      "type": "stat",
+      "gridPos": {"x": 12, "y": 0, "w": 4, "h": 4},
+      "targets": [
+        {"expr": "rate(axon_inference_latency_ms_sum{model=~\"$model\"}[1m]) / rate(axon_inference_latency_ms_count{model=~\"$model\"}[1m])", "legendFormat": "ms"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms", "decimals": 1}}
+    },
+    {
+      "title": "Active Models",
+      "type": "table",
+      "gridPos": {"x": 16, "y": 0, "w": 8, "h": 4},
+      "targets": [
+        {"expr": "axon_model_info", "format": "table", "instant": true}
+      ],
+      "transformations": [
+        {"id": "filterFieldsByName", "options": {"include": {"names": ["model", "version", "Value"]}}},
+        {"id": "renameByRegex", "options": {"regex": "Value", "rename": "ready"}}
+      ]
+    },
+    {
+      "title": "Requests / sec (by status)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(axon_requests_total{model=~\"$model\",status=\"200\"}[1m]))", "legendFormat": "200 OK"},
+        {"expr": "sum(rate(axon_requests_total{model=~\"$model\",status=\"400\"}[1m]))", "legendFormat": "400 Bad Request"},
+        {"expr": "sum(rate(axon_requests_total{model=~\"$model\",status=\"500\"}[1m]))", "legendFormat": "500 Server Error"},
+        {"expr": "sum(rate(axon_requests_total{model=~\"$model\",status=\"503\"}[1m]))", "legendFormat": "503 Unavailable"},
+        {"expr": "sum(rate(axon_requests_total{model=~\"$model\",status=\"504\"}[1m]))", "legendFormat": "504 Timeout"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"fillOpacity": 20, "lineWidth": 2}},
+        "overrides": [
+          {"matcher": {"id": "byName", "options": "200 OK"}, "properties": [{"id": "color", "value": {"fixedColor": "green", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "400 Bad Request"}, "properties": [{"id": "color", "value": {"fixedColor": "orange", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "500 Server Error"}, "properties": [{"id": "color", "value": {"fixedColor": "red", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "503 Unavailable"}, "properties": [{"id": "color", "value": {"fixedColor": "yellow", "mode": "fixed"}}]},
+          {"matcher": {"id": "byName", "options": "504 Timeout"}, "properties": [{"id": "color", "value": {"fixedColor": "purple", "mode": "fixed"}}]}
         ]
       }
-    ],
-    "templating": {
-      "list": [
-        {
-          "name": "model",
-          "type": "query",
-          "query": "label_values(inference_requests_total, model)"
-        }
-      ]
+    },
+    {
+      "title": "Error Rate %",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 4, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(axon_requests_total{model=~\"$model\",status!=\"200\"}[1m])) / sum(rate(axon_requests_total{model=~\"$model\"}[1m])) * 100", "legendFormat": "Error %"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "percent", "custom": {"lineWidth": 2, "fillOpacity": 30}, "thresholds": {"steps": [{"value": 0, "color": "green"}, {"value": 1, "color": "orange"}, {"value": 5, "color": "red"}]}}
+      }
+    },
+    {
+      "title": "Inference Latency (ms)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "histogram_quantile(0.50, sum(rate(axon_inference_latency_ms_bucket{model=~\"$model\"}[1m])) by (le, model))", "legendFormat": "p50 {{model}}"},
+        {"expr": "histogram_quantile(0.95, sum(rate(axon_inference_latency_ms_bucket{model=~\"$model\"}[1m])) by (le, model))", "legendFormat": "p95 {{model}}"},
+        {"expr": "histogram_quantile(0.99, sum(rate(axon_inference_latency_ms_bucket{model=~\"$model\"}[1m])) by (le, model))", "legendFormat": "p99 {{model}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "ms", "custom": {"lineWidth": 2}}}
+    },
+    {
+      "title": "Latency Heatmap",
+      "type": "heatmap",
+      "gridPos": {"x": 12, "y": 12, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(axon_inference_latency_ms_bucket{model=~\"$model\"}[1m])) by (le)", "legendFormat": "{{le}}"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "title": "CPU Usage (cores)",
+      "type": "timeseries",
+      "gridPos": {"x": 0, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "sum(rate(container_cpu_usage_seconds_total{namespace=\"default\",pod=~\"inference-server.*\",container=\"axon-server\"}[1m]))", "legendFormat": "CPU cores"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "cores", "custom": {"fillOpacity": 20, "lineWidth": 2}}}
+    },
+    {
+      "title": "Memory Usage (MB)",
+      "type": "timeseries",
+      "gridPos": {"x": 12, "y": 20, "w": 12, "h": 8},
+      "targets": [
+        {"expr": "container_memory_working_set_bytes{namespace=\"default\",pod=~\"inference-server.*\",container=\"axon-server\"} / 1024 / 1024", "legendFormat": "Memory MB"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "mbytes", "custom": {"fillOpacity": 30, "lineWidth": 2}}}
     }
-  }
+  ]
 }

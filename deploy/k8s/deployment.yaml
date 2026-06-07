@@ -15,76 +15,49 @@ spec:
         app: inference-server
     spec:
       containers:
-        - name: control-plane
-          image: mustdo12/axon-control-plane:v0.0.1
+        - name: axon-server
+          image: mustdo12/axon-server:0.2.0
           imagePullPolicy: IfNotPresent
           ports:
-            - containerPort: 8080
+            - containerPort: 8000
               name: http
             - containerPort: 8001
               name: grpc
-          env:
-            - name: INFERENCE_SOCKET
-              value: /run/inference.sock
-            - name: MODEL_REPO_PATH
-              value: /models
-            - name: HTTP_PORT
-              value: "8080"
-            - name: GRPC_PORT
-              value: "8001"
+            - containerPort: 8002
+              name: metrics
+          args:
+            - "--model-repository=/models"
+            - "--model-control-mode=poll"
+            - "--repository-poll-secs=30"
+            - "--http-port=8000"
+            - "--grpc-port=8001"
+            - "--metrics-port=8002"
+            - "--num-threads=4"
           resources:
             requests:
-              cpu: "250m"
-              memory: "256Mi"
+              cpu: "500m"
+              memory: "512Mi"
             limits:
-              cpu: "1000m"
-              memory: "1Gi"
+              cpu: "2000m"
+              memory: "2Gi"
           livenessProbe:
             httpGet:
               path: /v2/health/live
-              port: 8080
-            initialDelaySeconds: 10
-            periodSeconds: 5
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /v2/health/ready
-              port: 8080
-            initialDelaySeconds: 15
-            periodSeconds: 5
-          volumeMounts:
-            - name: models
-              mountPath: /models
-            - name: socket-dir
-              mountPath: /run
-
-        - name: inference-engine
-          image: mustdo12/axon-inference-engine:v0.0.1
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: SOCKET_PATH
-              value: /run/inference.sock
-            - name: NUM_THREADS
-              value: "2"
-            - name: ARENA_SIZE_MB
-              value: "2048"
-          resources:
-            requests:
-              cpu: "1000m"
-              memory: "1Gi"
-            limits:
-              cpu: "4000m"
-              memory: "4Gi"
+              port: 8000
+            initialDelaySeconds: 40
+            periodSeconds: 10
           volumeMounts:
             - name: models
               mountPath: /models
               readOnly: true
-            - name: socket-dir
-              mountPath: /run
-
       volumes:
         - name: models
           hostPath:
-            path: /Users/mustafacavusoglu/workspace/axon/local_models/model_repository
+            path: /data/models
             type: Directory
-        - name: socket-dir
-          emptyDir: {}

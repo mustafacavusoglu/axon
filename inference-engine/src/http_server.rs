@@ -282,14 +282,23 @@ async fn run_inference(
     model_name: String,
     req: InferRequest,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let queue_start = Instant::now();
     let _permit = session
         .concurrency()
         .acquire()
         .await
-        .map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+        .map_err(|e| {
+            tracing::warn!(error = %e, "concurrency limit reached");
+            metrics::record_request(&model_name, "503");
+            StatusCode::SERVICE_UNAVAILABLE
+        })?;
+    metrics::record_queue_wait(&model_name, queue_start.elapsed().as_secs_f64());
+    metrics::inc_inflight(&model_name);
 
     let inputs = parse_http_inputs(&req.inputs).map_err(|e| {
         tracing::warn!(error = %e, "bad request");
+        metrics::dec_inflight(&model_name);
+        metrics::record_request(&model_name, "400");
         StatusCode::BAD_REQUEST
     })?;
 
@@ -297,23 +306,31 @@ async fn run_inference(
     let runner = session.runner.clone();
     let infer_future = tokio::task::spawn_blocking(move || runner.run(inputs));
 
-    let outputs = tokio::time::timeout(state.inference_timeout, infer_future)
-        .await
-        .map_err(|_| {
-            tracing::warn!(model = %model_name, timeout_ms = state.inference_timeout.as_millis(), "inference timed out");
-            StatusCode::GATEWAY_TIMEOUT
-        })?
-        .map_err(|e| {
-            tracing::error!(error = %e, "spawn_blocking failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .map_err(|e| {
+    let outputs = match tokio::time::timeout(state.inference_timeout, infer_future).await {
+        Ok(Ok(Ok(out))) => out,
+        Ok(Ok(Err(e))) => {
+            metrics::dec_inflight(&model_name);
             tracing::error!(error = %e, "inference failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+            metrics::record_request(&model_name, "500");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Ok(Err(e)) => {
+            metrics::dec_inflight(&model_name);
+            tracing::error!(error = %e, "spawn_blocking failed");
+            metrics::record_request(&model_name, "500");
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+        Err(_) => {
+            metrics::dec_inflight(&model_name);
+            tracing::warn!(model = %model_name, timeout_ms = state.inference_timeout.as_millis(), "inference timed out");
+            metrics::record_request(&model_name, "504");
+            return Err(StatusCode::GATEWAY_TIMEOUT);
+        }
+    };
 
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-    metrics::inc_requests();
+    metrics::dec_inflight(&model_name);
+    metrics::record_request(&model_name, "200");
     metrics::record_latency(&model_name, latency_ms);
 
     let response_outputs: Vec<InferOutputResponse> = outputs

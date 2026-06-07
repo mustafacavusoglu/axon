@@ -79,6 +79,7 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
             if let Ok(cb) = get_circuit_breaker().lock() {
                 if cb.is_open(&cb_key) {
                     tracing::debug!(model = %model_name, version, "circuit open, skipping");
+                    metrics::record_circuit_breaker_trip();
                     continue;
                 }
             }
@@ -89,14 +90,19 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
                 continue;
             }
 
+            let load_start = std::time::Instant::now();
             match pool.load_model(&model_name, version, &model_file, concurrency) {
                 Ok(_) => {
+                    let load_secs = load_start.elapsed().as_secs_f64();
+                    metrics::record_model_load_duration(&model_name, load_secs);
+                    metrics::set_model_ready(&model_name, version);
                     if let Ok(mut cb) = get_circuit_breaker().lock() {
                         cb.record_success(&cb_key);
                     }
                 }
                 Err(e) => {
                     tracing::error!(model = %model_name, version, error = %e, "failed to load model");
+                    metrics::record_model_load_error(&model_name);
                     if let Ok(mut cb) = get_circuit_breaker().lock() {
                         cb.record_failure(&cb_key);
                     }
