@@ -1,10 +1,10 @@
 [package]
-name = "inference-engine"
-version = "0.1.0"
+name = "axon-server"
+version = "0.2.0"
 edition = "2021"
 
 [[bin]]
-name = "inference-engine"
+name = "axon-server"
 path = "src/main.rs"
 
 [dependencies]
@@ -30,6 +30,11 @@ tracing-opentelemetry = "0.33.0"
 opentelemetry = "0.32.0"
 opentelemetry-otlp = { version = "0.32.0", features = ["grpc-tonic"] }
 opentelemetry_sdk = "0.32.1"
+clap = { version = "4", features = ["derive"] }
+axum = "0.8"
+tower-http = { version = "0.6", features = ["cors"] }
+parking_lot = "0.12"
+notify = { version = "7", features = ["macos_fsevent"] }
 
 [build-dependencies]
 tonic-build = "0.12"

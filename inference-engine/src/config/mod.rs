@@ -1,32 +1,34 @@
 use std::path::PathBuf;
 
-#[derive(Debug, Clone)]
-pub struct EngineConfig {
-    pub socket_path: PathBuf,
-    pub num_threads: usize,
-    pub arena_size_mb: usize,
-    pub inference_timeout_ms: u64,
-}
+use clap::Parser;
 
-impl EngineConfig {
-    pub fn from_env() -> anyhow::Result<Self> {
-        Ok(Self {
-            socket_path: std::env::var("SOCKET_PATH")
-                .unwrap_or_else(|_| "/run/inference.sock".into())
-                .into(),
-            num_threads: std::env::var("NUM_THREADS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .filter(|&n| n > 0)
-                .unwrap_or_else(num_cpus::get_physical),
-            arena_size_mb: std::env::var("ARENA_SIZE_MB")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(4096),
-            inference_timeout_ms: std::env::var("INFERENCE_TIMEOUT_MS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30000),
-        })
-    }
+#[derive(Parser, Debug, Clone)]
+#[command(name = "axon-server", version = "0.2.0", about = "Axon Inference Server — CPU ONNX serving")]
+pub struct ServerConfig {
+    #[arg(long, default_value = "/models")]
+    pub model_repository: PathBuf,
+
+    #[arg(long, default_value = "none", help = "Model control mode: none, poll")]
+    pub model_control_mode: String,
+
+    #[arg(long, default_value_t = 30)]
+    pub repository_poll_secs: u64,
+
+    #[arg(long, default_value_t = 8000)]
+    pub http_port: u16,
+
+    #[arg(long, default_value_t = 8001)]
+    pub grpc_port: u16,
+
+    #[arg(long, default_value_t = 8002)]
+    pub metrics_port: u16,
+
+    #[arg(long, default_value_t = 30000)]
+    pub inference_timeout_ms: u64,
+
+    #[arg(long, default_value_t = 0, help = "Worker threads (0 = auto-detect)")]
+    pub num_threads: usize,
+
+    #[arg(long, default_value_t = 4)]
+    pub concurrency_per_model: u32,
 }

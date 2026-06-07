@@ -25,14 +25,24 @@ impl TensorArena {
     }
 
     pub fn alloc(&self, size: usize) -> Option<&[u8]> {
-        let offset = self.cursor.fetch_add(size, Ordering::SeqCst);
-        if offset + size > self.capacity {
-            self.cursor.store(0, Ordering::Release);
-            return None;
+        loop {
+            let offset = self.cursor.load(Ordering::Acquire);
+            if offset + size > self.capacity {
+                return None;
+            }
+            if self
+                .cursor
+                .compare_exchange_weak(offset, offset + size, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return Some(&self.slab[offset..offset + size]);
+            }
         }
-        Some(&self.slab[offset..offset + size])
     }
 }
+
+unsafe impl Send for TensorArena {}
+unsafe impl Sync for TensorArena {}
 
 #[cfg(test)]
 mod tests {
@@ -43,6 +53,7 @@ mod tests {
         let arena = TensorArena::new(1024);
         let a = arena.alloc(512);
         assert!(a.is_some());
+        assert_eq!(a.unwrap().len(), 512);
         arena.reset();
         assert_eq!(arena.cursor.load(Ordering::Acquire), 0);
     }
@@ -52,5 +63,16 @@ mod tests {
         let arena = TensorArena::new(10);
         let a = arena.alloc(20);
         assert!(a.is_none());
+    }
+
+    #[test]
+    fn test_sequential_alloc() {
+        let arena = TensorArena::new(100);
+        let a = arena.alloc(50);
+        assert!(a.is_some());
+        let b = arena.alloc(50);
+        assert!(b.is_some());
+        let c = arena.alloc(1);
+        assert!(c.is_none());
     }
 }

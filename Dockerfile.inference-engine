@@ -10,7 +10,7 @@ WORKDIR /build
 
 COPY inference-engine/Cargo.toml inference-engine/Cargo.lock* inference-engine/build.rs ./
 COPY proto/ ../proto/
-RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release
+RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release 2>/dev/null || true
 
 COPY inference-engine/src/ ./src/
 
@@ -34,10 +34,12 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then ARCH="aarch64"; else ARCH="x64"; fi && 
     cp /opt/onnxruntime-linux-${ARCH}-${ONNX_VERSION}/lib/libonnxruntime.so* /usr/local/lib/ && \
     rm -rf /opt/onnxruntime-linux-* /tmp/onnx.tgz
 
-COPY --from=builder /build/target/release/inference-engine /usr/local/bin/inference-engine
+COPY --from=builder /build/target/release/axon-server /usr/local/bin/axon-server
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
-VOLUME ["/models", "/run"]
+VOLUME ["/models"]
+EXPOSE 8000 8001 8002
 
-ENTRYPOINT ["inference-engine"]
+ENTRYPOINT ["axon-server"]
+CMD ["--model-repository=/models", "--http-port=8000", "--grpc-port=8001", "--metrics-port=8002"]

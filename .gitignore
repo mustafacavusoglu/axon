@@ -31,3 +31,4 @@ local_models/*
 
 local_models/models/*.pkl
 aklıma-gelenler.md
+.claude/*

@@ -1,5 +1,6 @@
-use std::path::PathBuf;
-use std::sync::{Arc, atomic::AtomicU64};
+use std::path::Path;
+use std::sync::atomic::AtomicU64;
+use std::sync::Arc;
 
 use anyhow::Context;
 use dashmap::DashMap;
@@ -9,9 +10,7 @@ use crate::session::runner::ModelRunner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SessionState {
-    Loading,
     Ready,
-    Unloading,
     Error,
 }
 
@@ -52,7 +51,7 @@ impl SessionPool {
         &self,
         name: &str,
         version: u32,
-        model_path: &PathBuf,
+        model_path: &Path,
         concurrency: u32,
     ) -> anyhow::Result<Arc<ModelSession>> {
         let key = model_key(name, version);
@@ -63,17 +62,24 @@ impl SessionPool {
             }
         }
 
-        let model_file = model_path.join("model.onnx");
-        let runner = ModelRunner::load(&model_file)?;
+        if !model_path.exists() {
+            anyhow::bail!("model file not found: {}", model_path.display());
+        }
 
-        let count = if concurrency > 0 { concurrency } else { 1 };
+        let runner = ModelRunner::load(model_path)?;
+
+        let count = if concurrency > 0 {
+            concurrency as usize
+        } else {
+            4
+        };
         let session = Arc::new(ModelSession {
             name: name.to_string(),
             version,
             state: SessionState::Ready,
-            memory_bytes: AtomicU64::new(runner.estimate_memory()),
+            memory_bytes: AtomicU64::new(0),
             runner: Arc::new(runner),
-            concurrency: Arc::new(Semaphore::new(count as usize)),
+            concurrency: Arc::new(Semaphore::new(count)),
         });
 
         self.sessions.insert(key, session.clone());
@@ -92,12 +98,22 @@ impl SessionPool {
         }
     }
 
-    pub fn get(&self, name: &str, version: u32) -> anyhow::Result<Arc<ModelSession>> {
+    pub fn get(&self, name: &str, version: u32) -> Option<Arc<ModelSession>> {
         let key = model_key(name, version);
-        self.sessions
-            .get(&key)
-            .map(|r| r.clone())
-            .ok_or_else(|| anyhow::anyhow!("model not loaded: {}", key))
+        self.sessions.get(&key).map(|r| r.clone())
+    }
+
+    pub fn get_latest(&self, name: &str) -> Option<Arc<ModelSession>> {
+        let mut latest: Option<Arc<ModelSession>> = None;
+        for entry in self.sessions.iter() {
+            let s = entry.value();
+            if s.name == name && s.state == SessionState::Ready {
+                if latest.as_ref().map_or(true, |l| s.version > l.version) {
+                    latest = Some(s.clone());
+                }
+            }
+        }
+        latest
     }
 
     pub fn list_models(&self) -> Vec<(String, u32, SessionState)> {
@@ -108,5 +124,31 @@ impl SessionPool {
                 (s.name.clone(), s.version, s.state)
             })
             .collect()
+    }
+
+    pub fn model_count(&self) -> usize {
+        self.sessions.len()
+    }
+
+    pub fn get_versions(&self, name: &str) -> Vec<u32> {
+        let mut versions: Vec<u32> = self
+            .sessions
+            .iter()
+            .filter(|e| e.value().name == name)
+            .map(|e| e.value().version)
+            .collect();
+        versions.sort();
+        versions
+    }
+
+    pub fn all_model_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .sessions
+            .iter()
+            .map(|e| e.value().name.clone())
+            .collect();
+        names.sort();
+        names.dedup();
+        names
     }
 }
