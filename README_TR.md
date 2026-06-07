@@ -193,9 +193,31 @@ instance_group {
 ## Metrikler
 
 Prometheus metrikleri `:8002/metrics` uzerinde:
-- `axon_requests_total` — Toplam inference istegi
-- `axon_models_loaded` — Yuklu model sayisi
-- `axon_inference_latency_ms{model="..."}` — Model basi latency histogrami
+
+| Metrik | Tip | Label | Aciklama |
+|--------|-----|-------|----------|
+| `axon_requests_total` | counter | model, status | Model ve HTTP status bazinda istekler |
+| `axon_inference_duration_seconds` | histogram | model | Uctan uca inference suresi |
+| `axon_inflight_requests` | gauge | model | Su an islenen istek sayisi |
+| `axon_queue_wait_seconds` | histogram | model | Concurrency permit bekleme suresi |
+| `axon_models_loaded` | gauge | — | Yuklu model sayisi |
+| `axon_model_info` | gauge | model, version | Model envanteri (1=hazir) |
+| `axon_model_load_duration_seconds` | histogram | model | Diskten model yukleme suresi |
+| `axon_model_load_errors_total` | counter | model | Model yukleme hatalari |
+| `axon_circuit_breaker_trips_total` | counter | — | Circuit breaker aktiflesmeleri |
+| `axon_server_info` | gauge | version | Server versiyon bilgisi |
+
+### Ornek Alertler (Grafana)
+```promql
+# P99 latency > 500ms
+histogram_quantile(0.99, rate(axon_inference_duration_seconds_bucket[5m])) > 0.5
+
+# Model dolulugu (inflight yaklasik limit)
+axon_inflight_requests / 4 > 0.8
+
+# Hata orani > %5
+rate(axon_requests_total{status=~"5.."}[5m]) / rate(axon_requests_total[5m]) > 0.05
+```
 
 ---
 
@@ -223,7 +245,6 @@ cargo test
 - Model warmup — ilk yuklemede ONNX oturumlarini isitma
 - Authentication — API key + mTLS
 - Binary tensor extension — buyuk veriler icin raw bytes
-- Graceful rolling update — sifir istek kaybiyla yeniden baslatma
 - Rate limiting middleware
 - Model A/B traffic splitting
 - LRU eviction — bellek baskisinda en az kullanilan modeli kaldirma

@@ -193,9 +193,31 @@ instance_group {
 ## Metrics
 
 Prometheus metrics at `:8002/metrics`:
-- `axon_requests_total` — Total inference requests
-- `axon_models_loaded` — Number of loaded models
-- `axon_inference_latency_ms{model="..."}` — Per-model latency histogram
+
+| Metric | Type | Labels | Description |
+|--------|------|--------|-------------|
+| `axon_requests_total` | counter | model, status | Requests by model and HTTP status |
+| `axon_inference_duration_seconds` | histogram | model | End-to-end inference latency |
+| `axon_inflight_requests` | gauge | model | Currently processing requests |
+| `axon_queue_wait_seconds` | histogram | model | Time waiting for concurrency permit |
+| `axon_models_loaded` | gauge | — | Number of loaded models |
+| `axon_model_info` | gauge | model, version | Model inventory (1=ready) |
+| `axon_model_load_duration_seconds` | histogram | model | Time to load model from disk |
+| `axon_model_load_errors_total` | counter | model | Model load failures |
+| `axon_circuit_breaker_trips_total` | counter | — | Circuit breaker activations |
+| `axon_server_info` | gauge | version | Server version identifier |
+
+### Key Alerts (Grafana examples)
+```promql
+# P99 latency > 500ms
+histogram_quantile(0.99, rate(axon_inference_duration_seconds_bucket[5m])) > 0.5
+
+# Model saturation (inflight near concurrency limit)
+axon_inflight_requests / 4 > 0.8
+
+# Error rate > 5%
+rate(axon_requests_total{status=~"5.."}[5m]) / rate(axon_requests_total[5m]) > 0.05
+```
 
 ---
 
@@ -223,7 +245,6 @@ cargo test
 - Model warmup — pre-warm ONNX sessions on load
 - Authentication — API key + mTLS
 - Binary tensor extension — raw bytes for large payloads
-- Graceful rolling update — zero dropped requests
 - Rate limiting middleware
 - Model A/B traffic splitting
 - LRU eviction — evict least-used model under memory pressure
