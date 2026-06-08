@@ -6,11 +6,26 @@ Single-binary, Triton-compatible, CPU-first model serving.
 **Language:** Rust  
 **Transport:** gRPC + HTTP/REST (KServe v2)  
 **Runtime:** ONNX Runtime  
+**BLS/Scripting:** Rhai (Python-like, Rust-native scripting language)  
 **Target:** Kubernetes / Docker / Bare-metal
 
 ---
 
 ## Quick Start
+
+### Build (from source)
+```bash
+# Requirements: Rust, ONNX Runtime (brew install onnxruntime)
+cd inference-engine
+
+# Debug build
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib cargo build
+
+# Release build
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib cargo build --release
+
+# Binary at: target/release/axon-server
+```
 
 ### Binary
 ```bash
@@ -188,6 +203,107 @@ instance_group {
 }
 ```
 
+## BLS / Script Models (Rhai)
+
+Use `platform: "script"` for preprocess, postprocess, or BLS (Business Logic Scripting).
+The scripting language is [Rhai](https://rhai.rs) — a Python-like, Rust-native embedded language.
+
+### Script Model Layout
+```
+/models/
+├── preprocess_model/
+│   ├── config.pbtxt      # platform: "script"
+│   ├── 1/
+│   │   └── model.rhai    # Script file
+```
+
+### config.pbtxt (script model)
+```
+name: "preprocess_model"
+platform: "script"
+max_batch_size: 1
+
+input {
+  name: "text"
+  data_type: TYPE_STRING
+  dims: [1]
+}
+output {
+  name: "processed"
+  data_type: TYPE_FP32
+  dims: [1, 2]
+}
+```
+
+### model.rhai API
+
+```rhai
+fn execute(inputs) {
+    // inputs: object map (name -> Tensor)
+
+    // Reading tensors
+    let t = inputs.get("text");
+    let text = t.as_string();
+    let shape = t.shape;
+    let dtype = t.datatype;
+    let data = t.as_f64();     // as f64 array
+    let ints = t.as_i64();     // as i64 array
+
+    // Creating tensors
+    let new_tensor = create_tensor_f64("name", shape_vals, data_vals);
+
+    // BLS: inference on another model
+    let result = infer("other_model", #{
+        "input_name": some_tensor,
+    });
+
+    // Return result
+    return #{ "output_name": result.get("output_name") };
+}
+```
+
+### BLS Example
+
+Preprocess + BLS calling xgb_california_housing (`model.rhai`):
+```rhai
+fn execute(inputs) {
+    let income = inputs.get("median_income");
+    let vals = income.as_f64();
+    let scaled = [];
+    for v in vals {
+        scaled.push(v * 1.5);
+    }
+    let scaled_income = create_tensor_f64("median_income", income.shape, scaled);
+
+    let mod_inputs = #{
+        "median_income": scaled_income,
+        "house_age": inputs.get("house_age"),
+        "avg_rooms": inputs.get("avg_rooms"),
+        "avg_bedrooms": inputs.get("avg_bedrooms"),
+        "population": inputs.get("population"),
+        "avg_occupancy": inputs.get("avg_occupancy"),
+        "latitude": inputs.get("latitude"),
+        "longitude": inputs.get("longitude"),
+    };
+
+    return infer("xgb_california_housing", mod_inputs);
+}
+```
+
+### Available Rhai API Functions
+
+| Function | Description |
+|----------|-------------|
+| `tensor.name` | Tensor name (getter) |
+| `tensor.shape` | Shape array (getter) |
+| `tensor.datatype` | Data type: "FP32", "INT64", "BYTES" (getter) |
+| `tensor.as_f64()` | Returns tensor data as f64 array |
+| `tensor.as_i64()` | Returns tensor data as i64 array |
+| `tensor.as_string()` | Returns string tensor data |
+| `create_tensor_f64(name, shape, data)` | Create FP32 tensor |
+| `create_tensor_i64(name, shape, data)` | Create INT64 tensor |
+| `infer(model_name, inputs)` | BLS: call inference on another model |
+
 ---
 
 ## Metrics
@@ -227,20 +343,26 @@ rate(axon_requests_total{status=~"5.."}[5m]) / rate(axon_requests_total[5m]) > 0
 # Build
 cd inference-engine && cargo build --release
 
-# Run locally
-ORT_DYLIB_PATH=/path/to/libonnxruntime.dylib \
-  ./target/release/axon-server --model-repository=./local_models/model_repository
-
 # Test
 cargo test
+
+# Run locally (requires ONNX Runtime)
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib \
+  ./target/release/axon-server --model-repository=./local_models/model_repository
 ```
+
+### Dependencies
+- **Rust** (stable)
+- **ONNX Runtime** — `brew install onnxruntime` (macOS) or download from GitHub
+- **Rhai** — embedded scripting engine (auto-fetched by cargo)
 
 ---
 
 ## Upcoming Features
 
+- ~~BLS / Scripting~~ — Preprocess/postprocess/BLS via Rhai scripting engine ✅
+- Ensemble pipelines — chain models via config.pbtxt (A output -> B input)
 - Dynamic batching — accumulate requests into batches per model
-- Ensemble pipelines — chain models (A output -> B input)
 - OpenVINO backend — Intel CPU optimization
 - Model warmup — pre-warm ONNX sessions on load
 - Authentication — API key + mTLS

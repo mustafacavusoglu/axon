@@ -74,7 +74,7 @@ impl SessionPool {
             4
         };
 
-        let runner = ModelRunner::load(model_path, count)?;
+        let runner = ModelRunner::load_onnx(model_path, count)?;
 
         let session = Arc::new(ModelSession {
             name: name.to_string(),
@@ -85,6 +85,45 @@ impl SessionPool {
 
         self.sessions.insert(key, session.clone());
         tracing::info!(name, version, instances = count, "model loaded");
+        Ok(session)
+    }
+
+    pub fn load_script_model(
+        &self,
+        name: &str,
+        version: u32,
+        script_path: &Path,
+        concurrency: u32,
+    ) -> anyhow::Result<Arc<ModelSession>> {
+        let key = model_key(name, version);
+
+        if let Some(existing) = self.sessions.get(&key) {
+            if existing.state == SessionState::Ready {
+                return Ok(existing.clone());
+            }
+        }
+
+        if !script_path.exists() {
+            anyhow::bail!("script file not found: {}", script_path.display());
+        }
+
+        let count = if concurrency > 0 {
+            concurrency as usize
+        } else {
+            4
+        };
+
+        let runner = ModelRunner::load_rhai(script_path, self.clone(), count)?;
+
+        let session = Arc::new(ModelSession {
+            name: name.to_string(),
+            version,
+            state: SessionState::Ready,
+            runner: Arc::new(runner),
+        });
+
+        self.sessions.insert(key, session.clone());
+        tracing::info!(name, version, instances = count, "script model loaded");
         Ok(session)
     }
 

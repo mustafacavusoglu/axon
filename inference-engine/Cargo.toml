@@ -35,6 +35,7 @@ axum = "0.8"
 tower-http = { version = "0.6", features = ["cors"] }
 parking_lot = "0.12"
 notify = { version = "7", features = ["macos_fsevent"] }
+rhai = { version = "1", features = ["sync"] }
 
 [build-dependencies]
 tonic-build = "0.12"

@@ -13,7 +13,7 @@ use tokio::sync::watch;
 use crate::metrics;
 use crate::model_repository;
 use crate::session::pool::SessionPool;
-use crate::session::runner::InputTensor;
+use crate::session::types::InputTensor;
 
 struct AppState {
     pool: SessionPool,
@@ -143,7 +143,7 @@ async fn model_metadata(
     let config = load_config_for_model(&state.repo_path, &model_name);
 
     let (inputs, outputs) = match config {
-        Some(cfg) => {
+        Some(ref cfg) => {
             let ins: Vec<TensorMetadataResponse> = cfg
                 .inputs
                 .iter()
@@ -167,10 +167,15 @@ async fn model_metadata(
         None => (vec![], vec![]),
     };
 
+    let platform = config
+        .as_ref()
+        .map(|c| c.platform.clone())
+        .unwrap_or_else(|| "onnxruntime_onnx".to_string());
+
     Ok(Json(ModelMetadataResponse {
         name: model_name,
         versions: versions.iter().map(|v| v.to_string()).collect(),
-        platform: "onnxruntime_onnx".to_string(),
+        platform,
         inputs,
         outputs,
     }))
@@ -187,7 +192,7 @@ async fn model_version_metadata(
 
     let config = load_config_for_model(&state.repo_path, &model_name);
     let (inputs, outputs) = match config {
-        Some(cfg) => {
+        Some(ref cfg) => {
             let ins: Vec<TensorMetadataResponse> = cfg
                 .inputs
                 .iter()
@@ -211,10 +216,15 @@ async fn model_version_metadata(
         None => (vec![], vec![]),
     };
 
+    let platform = config
+        .as_ref()
+        .map(|c| c.platform.clone())
+        .unwrap_or_else(|| "onnxruntime_onnx".to_string());
+
     Ok(Json(ModelMetadataResponse {
         name: model_name,
         versions: vec![version],
-        platform: "onnxruntime_onnx".to_string(),
+        platform,
         inputs,
         outputs,
     }))
@@ -338,13 +348,13 @@ async fn run_inference(
         .map(|(name, shape, tensor_data)| {
             let dtype = tensor_data.dtype_str().to_string();
             let data = match tensor_data {
-                crate::session::runner::TensorData::F32(d) => {
+                crate::session::types::TensorData::F32(d) => {
                     d.into_iter().map(|v| v as f64).collect()
                 }
-                crate::session::runner::TensorData::I32(d) => {
+                crate::session::types::TensorData::I32(d) => {
                     d.into_iter().map(|v| v as f64).collect()
                 }
-                crate::session::runner::TensorData::I64(d) => {
+                crate::session::types::TensorData::I64(d) => {
                     d.into_iter().map(|v| v as f64).collect()
                 }
             };

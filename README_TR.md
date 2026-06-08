@@ -6,11 +6,26 @@ Tek binary, Triton uyumlu, CPU oncelikli model sunum sistemi.
 **Dil:** Rust  
 **Iletisim:** gRPC + HTTP/REST (KServe v2)  
 **Runtime:** ONNX Runtime  
+**BLS/Scripting:** Rhai (Python benzeri Rust-native script dili)  
 **Hedef:** Kubernetes / Docker / Bare-metal
 
 ---
 
 ## Hizli Baslangic
+
+### Build (kaynaktan derleme)
+```bash
+# Gereksinimler: Rust, ONNX Runtime (brew install onnxruntime)
+cd inference-engine
+
+# Debug build
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib cargo build
+
+# Release build
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib cargo build --release
+
+# Binary yolu: target/release/axon-server
+```
 
 ### Binary
 ```bash
@@ -188,6 +203,123 @@ instance_group {
 }
 ```
 
+## BLS / Script Modelleri (Rhai)
+
+`platform: "script"` ile preprocess, postprocess veya BLS (Business Logic Scripting) islemleri yapabilirsiniz.
+Script dili olarak Python benzeri sentaksa sahip, Rust-native [Rhai](https://rhai.rs) kullanilir.
+
+### Script Model Dizini
+```
+/models/
+├── preprocess_model/
+│   ├── config.pbtxt      # platform: "script"
+│   ├── 1/
+│   │   └── model.rhai    # Script dosyasi
+```
+
+### config.pbtxt (script model)
+```
+name: "preprocess_model"
+platform: "script"
+max_batch_size: 1
+
+input {
+  name: "text"
+  data_type: TYPE_STRING
+  dims: [1]
+}
+output {
+  name: "processed"
+  data_type: TYPE_FP32
+  dims: [1, 2]
+}
+```
+
+### model.rhai API
+
+```rhai
+fn execute(inputs) {
+    // inputs: obje haritasi (isim -> Tensor)
+
+    // Tensor okuma
+    let t = inputs.get("text");
+    let text = t.as_string();
+    let shape = t.shape;
+    let dtype = t.datatype;
+    let data = t.as_f64();     // f64 dizisi olarak
+    let ints = t.as_i64();     // i64 dizisi olarak
+
+    // Tensor olusturma
+    let new_tensor = create_tensor_f64("name", shape_vals, data_vals);
+
+    // BLS: baska bir modele inference
+    let result = infer("diger_model", #{
+        "input_name": some_tensor,
+    });
+
+    // Sonucu dondur
+    return #{ "output_name": result.get("output_name") };
+}
+```
+
+### BLS Ornegi
+
+Preprocess + BLS ile xgb_california_housing modelini cagiran ornek (`model.rhai`):
+```rhai
+fn execute(inputs) {
+    let income = inputs.get("median_income");
+    let vals = income.as_f64();
+    let scaled = [];
+    for v in vals {
+        scaled.push(v * 1.5);
+    }
+    let scaled_income = create_tensor_f64("median_income", income.shape, scaled);
+
+    let mod_inputs = #{
+        "median_income": scaled_income,
+        "house_age": inputs.get("house_age"),
+        "avg_rooms": inputs.get("avg_rooms"),
+        "avg_bedrooms": inputs.get("avg_bedrooms"),
+        "population": inputs.get("population"),
+        "avg_occupancy": inputs.get("avg_occupancy"),
+        "latitude": inputs.get("latitude"),
+        "longitude": inputs.get("longitude"),
+    };
+
+    return infer("xgb_california_housing", mod_inputs);
+}
+```
+
+Inference cagrisi:
+```bash
+curl -s -X POST http://localhost:8000/v2/models/preprocess_housing/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[
+    {"name":"median_income","shape":[1],"datatype":"FP32","data":[3.5]},
+    {"name":"house_age","shape":[1],"datatype":"FP32","data":[20]},
+    {"name":"avg_rooms","shape":[1],"datatype":"FP32","data":[5]},
+    {"name":"avg_bedrooms","shape":[1],"datatype":"FP32","data":[1]},
+    {"name":"population","shape":[1],"datatype":"FP32","data":[1200]},
+    {"name":"avg_occupancy","shape":[1],"datatype":"FP32","data":[3]},
+    {"name":"latitude","shape":[1],"datatype":"FP32","data":[34]},
+    {"name":"longitude","shape":[1],"datatype":"FP32","data":[-118]}
+  ]}'
+```
+
+### Mevcut Rhai API Fonksiyonlari
+
+| Fonksiyon | Aciklama |
+|-----------|----------|
+| `tensor.name` | Tensor ismi (getter) |
+| `tensor.shape` | Shape dizisi (getter) |
+| `tensor.datatype` | Veri tipi: "FP32", "INT64", "BYTES" (getter) |
+| `tensor.as_f64()` | Tensor verisini f64 dizisi olarak dondurur |
+| `tensor.as_i64()` | Tensor verisini i64 dizisi olarak dondurur |
+| `tensor.as_string()` | String tensor verisini dondurur |
+| `create_tensor_f64(name, shape, data)` | FP32 tensor olusturur |
+| `create_tensor_i64(name, shape, data)` | INT64 tensor olusturur |
+| `infer(model_name, inputs)` | BLS: baska bir modele inference yapar |
+
 ---
 
 ## Metrikler
@@ -227,20 +359,26 @@ rate(axon_requests_total{status=~"5.."}[5m]) / rate(axon_requests_total[5m]) > 0
 # Derleme
 cd inference-engine && cargo build --release
 
-# Lokal calistirma
-ORT_DYLIB_PATH=/path/to/libonnxruntime.dylib \
-  ./target/release/axon-server --model-repository=./local_models/model_repository
-
 # Test
 cargo test
+
+# Lokal calistirma (ONNX Runtime gerektirir)
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib \
+  ./target/release/axon-server --model-repository=./local_models/model_repository
 ```
+
+### Bagimliliklar
+- **Rust** (stable)
+- **ONNX Runtime** — `brew install onnxruntime` (macOS) veya GitHub'dan indirin
+- **Rhai** — embedded scripting engine (cargo otomatik ceker)
 
 ---
 
 ## Siradaki Ozellikler
 
+- ~~BLS / Scripting~~ — Preprocess/postprocess/BLS Rhai scripting engine ✅
+- Ensemble pipelines — modelleri zincirleme (A ciktisi -> B girdisi, config.pbtxt tabanli)
 - Dynamic batching — modele ozel istekleri biriktirip toplu isleme
-- Ensemble pipelines — modelleri zincirleme (A ciktisi -> B girdisi)
 - OpenVINO backend — Intel CPU optimizasyonu
 - Model warmup — ilk yuklemede ONNX oturumlarini isitma
 - Authentication — API key + mTLS

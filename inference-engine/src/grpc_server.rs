@@ -7,7 +7,7 @@ use tonic::{Request, Response, Status};
 
 use crate::metrics;
 use crate::session::pool::SessionPool;
-use crate::session::runner::InputTensor;
+use crate::session::types::InputTensor;
 
 pub mod kfs {
     tonic::include_proto!("inference.kfs");
@@ -108,7 +108,7 @@ impl GrpcInferenceService for KfsService {
         }
 
         let config_path = self.repo_path.join(&req.name).join("config.pbtxt");
-        let (inputs, outputs) = if let Ok(content) = std::fs::read(&config_path) {
+        let (inputs, outputs, platform) = if let Ok(content) = std::fs::read(&config_path) {
             if let Ok(cfg) =
                 crate::model_repository::config_parser::parse_model_config(&content)
             {
@@ -130,18 +130,19 @@ impl GrpcInferenceService for KfsService {
                         shape: t.dims.clone(),
                     })
                     .collect();
-                (ins, outs)
+                let p = cfg.platform.clone();
+                (ins, outs, p)
             } else {
-                (vec![], vec![])
+                (vec![], vec![], "onnxruntime_onnx".to_string())
             }
         } else {
-            (vec![], vec![])
+            (vec![], vec![], "onnxruntime_onnx".to_string())
         };
 
         Ok(Response::new(ModelMetadataResponse {
             name: req.name,
             versions: versions.iter().map(|v| v.to_string()).collect(),
-            platform: "onnxruntime_onnx".to_string(),
+            platform,
             inputs,
             outputs,
         }))

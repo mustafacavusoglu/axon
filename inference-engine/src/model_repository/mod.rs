@@ -61,6 +61,11 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
         }
 
         let config = load_model_config(&model_dir);
+        let platform = config
+            .as_ref()
+            .map(|c| c.platform.clone())
+            .unwrap_or_else(|| "onnxruntime_onnx".to_string());
+
         let concurrency = config
             .as_ref()
             .and_then(|c| c.instance_groups.first())
@@ -84,27 +89,56 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
                 }
             }
 
-            let model_file = model_dir.join(version.to_string()).join("model.onnx");
-            if !model_file.exists() {
-                tracing::warn!(model = %model_name, version, "model.onnx not found, skipping");
-                continue;
-            }
+            if platform == "script" {
+                let script_file = model_dir
+                    .join(version.to_string())
+                    .join("model.rhai");
+                if !script_file.exists() {
+                    tracing::warn!(model = %model_name, version, "model.rhai not found, skipping");
+                    continue;
+                }
 
-            let load_start = std::time::Instant::now();
-            match pool.load_model(&model_name, version, &model_file, concurrency) {
-                Ok(_) => {
-                    let load_secs = load_start.elapsed().as_secs_f64();
-                    metrics::record_model_load_duration(&model_name, load_secs);
-                    metrics::set_model_ready(&model_name, version);
-                    if let Ok(mut cb) = get_circuit_breaker().lock() {
-                        cb.record_success(&cb_key);
+                let load_start = std::time::Instant::now();
+                match pool.load_script_model(&model_name, version, &script_file, concurrency) {
+                    Ok(_) => {
+                        let load_secs = load_start.elapsed().as_secs_f64();
+                        metrics::record_model_load_duration(&model_name, load_secs);
+                        metrics::set_model_ready(&model_name, version);
+                        if let Ok(mut cb) = get_circuit_breaker().lock() {
+                            cb.record_success(&cb_key);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(model = %model_name, version, error = %e, "failed to load script model");
+                        metrics::record_model_load_error(&model_name);
+                        if let Ok(mut cb) = get_circuit_breaker().lock() {
+                            cb.record_failure(&cb_key);
+                        }
                     }
                 }
-                Err(e) => {
-                    tracing::error!(model = %model_name, version, error = %e, "failed to load model");
-                    metrics::record_model_load_error(&model_name);
-                    if let Ok(mut cb) = get_circuit_breaker().lock() {
-                        cb.record_failure(&cb_key);
+            } else {
+                let model_file = model_dir.join(version.to_string()).join("model.onnx");
+                if !model_file.exists() {
+                    tracing::warn!(model = %model_name, version, "model.onnx not found, skipping");
+                    continue;
+                }
+
+                let load_start = std::time::Instant::now();
+                match pool.load_model(&model_name, version, &model_file, concurrency) {
+                    Ok(_) => {
+                        let load_secs = load_start.elapsed().as_secs_f64();
+                        metrics::record_model_load_duration(&model_name, load_secs);
+                        metrics::set_model_ready(&model_name, version);
+                        if let Ok(mut cb) = get_circuit_breaker().lock() {
+                            cb.record_success(&cb_key);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(model = %model_name, version, error = %e, "failed to load model");
+                        metrics::record_model_load_error(&model_name);
+                        if let Ok(mut cb) = get_circuit_breaker().lock() {
+                            cb.record_failure(&cb_key);
+                        }
                     }
                 }
             }
