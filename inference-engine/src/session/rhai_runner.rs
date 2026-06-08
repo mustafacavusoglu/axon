@@ -146,11 +146,21 @@ impl RhaiRunner {
         });
 
         engine.register_fn("create_tensor_f64",
-            |name: &str, shape: Vec<i64>, data: Vec<Dynamic>| -> RhaiTensor {
+            |name: &str, shape: Dynamic, data: rhai::Array| -> RhaiTensor {
+                let shape_i64: Vec<i64> = if shape.is::<Vec<i64>>() {
+                    shape.cast::<Vec<i64>>()
+                } else if shape.is::<rhai::Array>() {
+                    let arr = shape.cast::<rhai::Array>();
+                    arr.iter().map(|v| v.as_int().unwrap_or(1)).collect()
+                } else if shape.is_int() {
+                    vec![shape.as_int().unwrap_or(1)]
+                } else {
+                    vec![1]
+                };
                 let data_f64: Vec<f64> = data.iter().map(|v| v.as_float().unwrap_or(0.0)).collect();
                 RhaiTensor {
                     name: name.to_string(),
-                    shape,
+                    shape: shape_i64,
                     datatype: "FP32".to_string(),
                     data: RhaiTensorData::F64(data_f64),
                 }
@@ -158,11 +168,21 @@ impl RhaiRunner {
         );
 
         engine.register_fn("create_tensor_i64",
-            |name: &str, shape: Vec<i64>, data: Vec<Dynamic>| -> RhaiTensor {
+            |name: &str, shape: Dynamic, data: rhai::Array| -> RhaiTensor {
+                let shape_i64: Vec<i64> = if shape.is::<Vec<i64>>() {
+                    shape.cast::<Vec<i64>>()
+                } else if shape.is::<rhai::Array>() {
+                    let arr = shape.cast::<rhai::Array>();
+                    arr.iter().map(|v| v.as_int().unwrap_or(1)).collect()
+                } else if shape.is_int() {
+                    vec![shape.as_int().unwrap_or(1)]
+                } else {
+                    vec![1]
+                };
                 let data_i64: Vec<i64> = data.iter().map(|v| v.as_int().unwrap_or(0)).collect();
                 RhaiTensor {
                     name: name.to_string(),
-                    shape,
+                    shape: shape_i64,
                     datatype: "INT64".to_string(),
                     data: RhaiTensorData::I64(data_i64),
                 }
