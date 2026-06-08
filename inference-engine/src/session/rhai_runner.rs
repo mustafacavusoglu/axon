@@ -1,10 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use parking_lot::Mutex;
 use rhai::{Dynamic, Engine, Scope, AST};
 use tokio::sync::Semaphore;
 
 use crate::session::pool::SessionPool;
+use crate::tokenizer::Tokenizer;
 use super::types::{InferenceOutput, InputTensor, TensorData};
 
 #[derive(Clone)]
@@ -91,6 +93,7 @@ pub struct RhaiRunner {
     ast: AST,
     semaphore: Arc<Semaphore>,
     script_path: PathBuf,
+    tokenizer: Arc<Mutex<Option<Tokenizer>>>,
 }
 
 impl RhaiRunner {
@@ -101,6 +104,16 @@ impl RhaiRunner {
     ) -> anyhow::Result<Self> {
         let script_content = std::fs::read_to_string(script_path)
             .map_err(|e| anyhow::anyhow!("failed to read script {}: {}", script_path.display(), e))?;
+
+        let script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+        let tokenizer: Arc<Mutex<Option<Tokenizer>>> = Arc::new(Mutex::new(None));
+        let vocab_path = script_dir.join("vocab.txt");
+        let tokenizer_json_path = script_dir.join("tokenizer.json");
+        if vocab_path.exists() && tokenizer_json_path.exists() {
+            let tok = Tokenizer::load(&vocab_path, &tokenizer_json_path)?;
+            *tokenizer.lock() = Some(tok);
+        }
 
         let mut engine = Engine::new();
 
@@ -189,6 +202,42 @@ impl RhaiRunner {
             }
         );
 
+        let tokenizer_ref = tokenizer.clone();
+        engine.register_fn("tokenize", move |text: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+            let tok_guard = tokenizer_ref.lock();
+            let tok = tok_guard.as_ref()
+                .ok_or_else(|| "tokenizer not loaded (vocab.txt/tokenizer.json not found)".to_string())?;
+            let (input_ids, attention_mask, token_type_ids) = tok.encode(text);
+            drop(tok_guard);
+
+            let seq_len = input_ids.len() as i64;
+
+            let ids_tensor = RhaiTensor {
+                name: "input_ids".to_string(),
+                shape: vec![1, seq_len],
+                datatype: "INT64".to_string(),
+                data: RhaiTensorData::I64(input_ids),
+            };
+            let mask_tensor = RhaiTensor {
+                name: "attention_mask".to_string(),
+                shape: vec![1, seq_len],
+                datatype: "INT64".to_string(),
+                data: RhaiTensorData::I64(attention_mask),
+            };
+            let type_tensor = RhaiTensor {
+                name: "token_type_ids".to_string(),
+                shape: vec![1, seq_len],
+                datatype: "INT64".to_string(),
+                data: RhaiTensorData::I64(token_type_ids),
+            };
+
+            let mut result = rhai::Map::new();
+            result.insert("input_ids".into(), Dynamic::from(ids_tensor));
+            result.insert("attention_mask".into(), Dynamic::from(mask_tensor));
+            result.insert("token_type_ids".into(), Dynamic::from(type_tensor));
+            Ok(result)
+        });
+
         let bls_pool = pool.clone();
         engine.register_fn("infer", move |model_name: &str, inputs: rhai::Map| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
             let mut input_tensors: Vec<(String, InputTensor)> = Vec::new();
@@ -229,6 +278,7 @@ impl RhaiRunner {
             ast,
             semaphore: Arc::new(Semaphore::new(concurrency.max(1))),
             script_path: script_path.to_path_buf(),
+            tokenizer,
         })
     }
 

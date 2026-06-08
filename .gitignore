@@ -20,14 +20,12 @@ ARCHITECTURE.md
 DONE.md
 local_models/*
 
-.idea/
-.vscode/
-*.swp
-*.swo
-*~
-
-.env
-*.local
+nlp_model/ner_model/*
+nlp_model/ner_pipeline/1/model.onnx*
+nlp_model/ner_pipeline/1/labels.json
+nlp_model/ner_pipeline/1/tokenizer.json
+nlp_model/ner_pipeline/1/tokenizer_config.json
+nlp_model/ner_pipeline/1/vocab.txt
 
 local_models/models/*.pkl
 aklıma-gelenler.md

@@ -4,6 +4,7 @@ mod http_server;
 mod metrics;
 mod model_repository;
 mod session;
+mod tokenizer;
 
 use std::time::Duration;
 
