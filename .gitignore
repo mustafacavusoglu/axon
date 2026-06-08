@@ -20,6 +20,8 @@ ARCHITECTURE.md
 DONE.md
 local_models/*
 
+plan.md
+
 nlp_model/ner_model/*
 nlp_model/ner_pipeline/1/model.onnx*
 nlp_model/ner_pipeline/1/labels.json
