@@ -1,4 +1,5 @@
 *.onnx
+*.onnx.data
 *.pb.rs
 
 .venv/
@@ -15,21 +16,27 @@ dist/
 *.dll
 *.so
 *.dylib
-*.pbtxt
-ARCHITECTURE.md
-DONE.md
+
+# local_models: hepsini ignore et
 local_models/*
 
+# plan.md sadece lokalde
 plan.md
 
-nlp_model/ner_model/*
-nlp_model/ner_pipeline/1/model.onnx*
-nlp_model/ner_pipeline/1/labels.json
+# nlp_model: sadece büyük model dosyalarını ignore et
+nlp_model/ner_model/*.onnx
+nlp_model/ner_model/*.onnx.data
+nlp_model/ner_model/1/
+nlp_model/ner_pipeline/1/*.onnx
+nlp_model/ner_pipeline/1/*.onnx.data
 nlp_model/ner_pipeline/1/tokenizer.json
 nlp_model/ner_pipeline/1/tokenizer_config.json
 nlp_model/ner_pipeline/1/vocab.txt
 
-ml_model/xgb_housing/*
+# ml_model: sadece büyük model dosyalarını ignore et
+ml_model/xgb_housing/*.onnx
+ml_model/xgb_housing/*.onnx.data
+ml_model/xgb_housing/1/
 
 local_models/models/*.pkl
 aklıma-gelenler.md
