@@ -1,8 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::collections::HashMap;
 
-use parking_lot::Mutex;
 use rhai::{Dynamic, Engine, Scope, AST};
 use tokio::sync::Semaphore;
 
@@ -93,7 +91,6 @@ pub struct RhaiRunner {
     ast: AST,
     semaphore: Arc<Semaphore>,
     script_path: PathBuf,
-    vocab: Arc<Mutex<Option<HashMap<String, i64>>>>,
 }
 
 impl RhaiRunner {
@@ -107,28 +104,14 @@ impl RhaiRunner {
 
         let script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
-        let vocab: Arc<Mutex<Option<HashMap<String, i64>>>> = Arc::new(Mutex::new(None));
-        let vocab_path = script_dir.join("vocab.txt");
-        if vocab_path.exists() {
-            if let Ok(content) = std::fs::read_to_string(&vocab_path) {
-                let mut map = HashMap::new();
-                for (idx, line) in content.lines().enumerate() {
-                    let token = line.trim();
-                    if !token.is_empty() {
-                        map.insert(token.to_string(), idx as i64);
-                    }
-                }
-                tracing::info!(path = %vocab_path.display(), size = map.len(), "vocab loaded");
-                *vocab.lock() = Some(map);
-            }
-        }
-
         let mut engine = Engine::new();
 
         engine.register_type::<RhaiTensor>();
 
         engine.register_get("name", |t: &mut RhaiTensor| t.name.clone());
-        engine.register_get("shape", |t: &mut RhaiTensor| t.shape.clone());
+        engine.register_get("shape", |t: &mut RhaiTensor| -> Vec<Dynamic> {
+            t.shape.iter().map(|&d| Dynamic::from(d)).collect()
+        });
         engine.register_get("datatype", |t: &mut RhaiTensor| t.datatype.clone());
 
         engine.register_fn("as_f64", |t: &mut RhaiTensor| -> Vec<Dynamic> {
@@ -210,81 +193,6 @@ impl RhaiRunner {
             }
         );
 
-        let vocab_clone = vocab.clone();
-        engine.register_fn("vocab_id", move |token: &str| -> i64 {
-            if let Some(ref map) = *vocab_clone.lock() {
-                map.get(token).copied().unwrap_or(0)
-            } else {
-                0
-            }
-        });
-
-        let vocab_has = vocab.clone();
-        engine.register_fn("vocab_has", move |token: &str| -> bool {
-            if let Some(ref map) = *vocab_has.lock() {
-                map.contains_key(token)
-            } else {
-                false
-            }
-        });
-
-        let vocab_unka = vocab.clone();
-        engine.register_fn("unk_id", move || -> i64 {
-            if let Some(ref map) = *vocab_unka.lock() {
-                map.get("[UNK]").copied().unwrap_or(0)
-            } else {
-                0
-            }
-        });
-
-        let vocab_clsa = vocab.clone();
-        engine.register_fn("cls_id", move || -> i64 {
-            if let Some(ref map) = *vocab_clsa.lock() {
-                map.get("[CLS]").copied().unwrap_or(0)
-            } else {
-                0
-            }
-        });
-
-        let vocab_sepa = vocab.clone();
-        engine.register_fn("sep_id", move || -> i64 {
-            if let Some(ref map) = *vocab_sepa.lock() {
-                map.get("[SEP]").copied().unwrap_or(0)
-            } else {
-                0
-            }
-        });
-
-        engine.register_fn("substr", |s: &str, start: i64, len: i64| -> String {
-            let start = start.max(0) as usize;
-            let end = (start + len.max(0) as usize).min(s.len());
-            s[start..end].to_string()
-        });
-
-        engine.register_fn("split_text", |text: &str| -> Vec<Dynamic> {
-            let mut words: Vec<Dynamic> = Vec::new();
-            let mut current = String::new();
-            for ch in text.chars() {
-                if ch.is_whitespace() {
-                    if !current.is_empty() {
-                        words.push(current.clone().into());
-                        current.clear();
-                    }
-                } else if ch.is_ascii_punctuation() && ch != '-' && ch != '#' {
-                    if !current.is_empty() {
-                        words.push(current.clone().into());
-                        current.clear();
-                    }
-                } else {
-                    current.push(ch);
-                }
-            }
-            if !current.is_empty() {
-                words.push(current.into());
-            }
-            words
-        });
-
         let bls_pool = pool.clone();
         engine.register_fn("infer", move |model_name: &str, inputs: rhai::Map| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
             let mut input_tensors: Vec<(String, InputTensor)> = Vec::new();
@@ -325,7 +233,6 @@ impl RhaiRunner {
             ast,
             semaphore: Arc::new(Semaphore::new(concurrency.max(1))),
             script_path: script_path.to_path_buf(),
-            vocab,
         })
     }
 
