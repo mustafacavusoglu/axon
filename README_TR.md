@@ -13,29 +13,74 @@ Tek binary, Triton uyumlu, CPU oncelikli model sunum sistemi.
 
 ## Hizli Baslangic
 
-### Build (kaynaktan derleme)
+### 1. Gereksinimler
 ```bash
-# Gereksinimler: Rust, ONNX Runtime (brew install onnxruntime)
-cd inference-engine
+# Rust (stable)
+curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
-# Debug build
-ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib cargo build
+# ONNX Runtime (macOS)
+brew install onnxruntime
 
-# Release build
-ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib cargo build --release
+# ONNX Runtime (Linux)
+# https://github.com/microsoft/onnxruntime/releases adresinden indirip /usr/local/lib'e kopyalayin
 
-# Binary yolu: target/release/axon-server
+# Protobuf derleyici (Linux)
+apt-get install protobuf-compiler
 ```
 
-### Binary
+### 2. Build (kaynaktan derleme)
 ```bash
-axon-server \
+git clone https://github.com/mustafacavusoglu/axon.git
+cd axon/inference-engine
+
+# macOS
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib cargo build --release
+
+# Linux
+cargo build --release
+
+# Binary: target/release/axon-server
+```
+
+### 3. Model deposu hazirlama
+```bash
+# ONNX modeli icin dizin yapisi:
+# models/
+# ├── model-adi/
+# │   ├── config.pbtxt
+# │   ├── 1/
+# │   │   └── model.onnx
+
+# Script modeli icin:
+# models/
+# ├── pipeline/
+# │   ├── config.pbtxt     # platform: "script"
+# │   ├── 1/
+# │   │   └── model.rhai
+```
+
+### 4. Sunucuyu calistirma
+```bash
+# macOS
+ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib \
+  ./target/release/axon-server \
+  --model-repository=./models \
+  --model-control-mode=poll
+
+# Linux
+./target/release/axon-server \
   --model-repository=/models \
-  --model-control-mode=poll \
-  --repository-poll-secs=30 \
-  --http-port=8000 \
-  --grpc-port=8001 \
-  --metrics-port=8002
+  --model-control-mode=poll
+
+# Saglik kontrolu
+curl http://localhost:8000/v2/health/ready
+```
+
+### 5. Inference
+```bash
+curl -s -X POST http://localhost:8000/v2/models/model-adi/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[{"name":"features","shape":[1],"datatype":"FP32","data":[42.5]}]}'
 ```
 
 ### Docker
