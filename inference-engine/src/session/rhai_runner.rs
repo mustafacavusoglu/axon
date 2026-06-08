@@ -207,6 +207,37 @@ impl RhaiRunner {
             }
         );
 
+        let script_dir2 = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        engine.register_fn("read_lines", move |path: &str| -> Vec<Dynamic> {
+            let full_path = script_dir2.join(path);
+            let mut lines = Vec::new();
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        lines.push(Dynamic::from(trimmed.to_string()));
+                    }
+                }
+            }
+            lines
+        });
+
+        engine.register_fn("split_words", |text: &str| -> Vec<Dynamic> {
+            let mut words: Vec<Dynamic> = Vec::new();
+            let mut current = String::new();
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    if !current.is_empty() { words.push(current.clone().into()); current.clear(); }
+                } else if ch.is_ascii_punctuation() && ch != '-' && ch != '#' {
+                    if !current.is_empty() { words.push(current.clone().into()); current.clear(); }
+                } else {
+                    current.push(ch);
+                }
+            }
+            if !current.is_empty() { words.push(current.into()); }
+            words
+        });
+
         let bls_pool = pool.clone();
         engine.register_fn("infer", move |model_name: &str, inputs: rhai::Map| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
             let mut input_tensors: Vec<(String, InputTensor)> = Vec::new();
