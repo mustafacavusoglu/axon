@@ -27,6 +27,8 @@ nlp_model/ner_pipeline/1/tokenizer.json
 nlp_model/ner_pipeline/1/tokenizer_config.json
 nlp_model/ner_pipeline/1/vocab.txt
 
+ml_model/xgb_housing/*
+
 local_models/models/*.pkl
 aklıma-gelenler.md
 .claude/*
