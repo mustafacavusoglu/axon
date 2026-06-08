@@ -252,11 +252,12 @@ instance_group {
 
 Use `platform: "script"` for preprocess, postprocess, or BLS (Business Logic Scripting).
 The scripting language is [Rhai](https://rhai.rs) — a Python-like, Rust-native embedded language.
+The inference engine contains **zero model-specific functions** — all business logic lives in `model.rhai`.
 
 ### Script Model Layout
 ```
-/models/
-├── preprocess_model/
+models/
+├── pipeline/
 │   ├── config.pbtxt      # platform: "script"
 │   ├── 1/
 │   │   └── model.rhai    # Script file
@@ -264,90 +265,124 @@ The scripting language is [Rhai](https://rhai.rs) — a Python-like, Rust-native
 
 ### config.pbtxt (script model)
 ```
-name: "preprocess_model"
+name: "pipeline"
 platform: "script"
 max_batch_size: 1
 
 input {
-  name: "text"
-  data_type: TYPE_STRING
+  name: "features"
+  data_type: TYPE_FP32
   dims: [1]
 }
 output {
-  name: "processed"
+  name: "result"
   data_type: TYPE_FP32
-  dims: [1, 2]
+  dims: [1]
 }
+
+instance_group { count: 2 kind: KIND_CPU }
 ```
 
-### model.rhai API
+### Rhai API
 
-```rhai
-fn execute(inputs) {
-    // inputs: object map (name -> Tensor)
-
-    // Reading tensors
-    let t = inputs.get("text");
-    let text = t.as_string();
-    let shape = t.shape;
-    let dtype = t.datatype;
-    let data = t.as_f64();     // as f64 array
-    let ints = t.as_i64();     // as i64 array
-
-    // Creating tensors
-    let new_tensor = create_tensor_f64("name", shape_vals, data_vals);
-
-    // BLS: inference on another model
-    let result = infer("other_model", #{
-        "input_name": some_tensor,
-    });
-
-    // Return result
-    return #{ "output_name": result.get("output_name") };
-}
-```
-
-### BLS Example
-
-Preprocess + BLS calling xgb_california_housing (`model.rhai`):
-```rhai
-fn execute(inputs) {
-    let income = inputs.get("median_income");
-    let vals = income.as_f64();
-    let scaled = [];
-    for v in vals {
-        scaled.push(v * 1.5);
-    }
-    let scaled_income = create_tensor_f64("median_income", income.shape, scaled);
-
-    let mod_inputs = #{
-        "median_income": scaled_income,
-        "house_age": inputs.get("house_age"),
-        "avg_rooms": inputs.get("avg_rooms"),
-        "avg_bedrooms": inputs.get("avg_bedrooms"),
-        "population": inputs.get("population"),
-        "avg_occupancy": inputs.get("avg_occupancy"),
-        "latitude": inputs.get("latitude"),
-        "longitude": inputs.get("longitude"),
-    };
-
-    return infer("xgb_california_housing", mod_inputs);
-}
-```
-
-### Available Rhai API Functions
+Functions provided by the inference engine (tensor ops and BLS only):
 
 | Function | Description |
 |----------|-------------|
 | `tensor.name` | Tensor name (getter) |
 | `tensor.shape` | Shape array (getter) |
 | `tensor.datatype` | Data type: "FP32", "INT64", "BYTES" (getter) |
-| `tensor.as_f64()` | Returns tensor data as f64 array |
-| `tensor.as_i64()` | Returns tensor data as i64 array |
-| `tensor.as_string()` | Returns string tensor data |
+| `tensor.as_f64()` | Returns data as f64 array |
+| `tensor.as_i64()` | Returns data as i64 array |
+| `tensor.as_string()` | Returns string data |
 | `create_tensor_f64(name, shape, data)` | Create FP32 tensor |
 | `create_tensor_i64(name, shape, data)` | Create INT64 tensor |
+| `create_tensor_string(name, shape, data)` | Create string tensor |
 | `infer(model_name, inputs)` | BLS: call inference on another model |
+
+### Example 1: ML Preprocess (fill null and -1 with 0)
+
+`ml_model/preprocess_ml/1/model.rhai` — replaces -1 and negative values with 0 before inference:
+
+```rhai
+fn clean(values) {
+    let cleaned = [];
+    for v in values {
+        if v < 0.0 { cleaned.push(0.0); }
+        else { cleaned.push(v); }
+    }
+    return cleaned;
+}
+
+fn execute(inputs) {
+    let names = ["median_income","house_age","avg_rooms","avg_bedrooms",
+                 "population","avg_occupancy","latitude","longitude"];
+    let cleaned = #{};
+    for name in names {
+        let t = inputs.get(name);
+        cleaned[name] = create_tensor_f64(name, t.shape, clean(t.as_f64()));
+    }
+    return infer("xgb_housing", cleaned);
+}
+```
+
+```bash
+# Data with -1 values (preprocess auto-fills with 0)
+curl -s -X POST http://localhost:8000/v2/models/preprocess_ml/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[
+    {"name":"median_income","shape":[1],"datatype":"FP32","data":[-1]},
+    {"name":"house_age","shape":[1],"datatype":"FP32","data":[20]},
+    {"name":"avg_rooms","shape":[1],"datatype":"FP32","data":[-1]},
+    {"name":"avg_bedrooms","shape":[1],"datatype":"FP32","data":[1]},
+    {"name":"population","shape":[1],"datatype":"FP32","data":[1200]},
+    {"name":"avg_occupancy","shape":[1],"datatype":"FP32","data":[-1]},
+    {"name":"latitude","shape":[1],"datatype":"FP32","data":[34]},
+    {"name":"longitude","shape":[1],"datatype":"FP32","data":[-118]}
+  ]}'
+```
+
+### Example 2: NLP NER Pipeline (attention mask + decode)
+
+`nlp_model/ner_pipeline/1/model.rhai` — receives pre-tokenized input_ids, adds attention mask, calls BERT via BLS, decodes logits to entity labels:
+
+```rhai
+fn execute(inputs) {
+    let ids = inputs.get("input_ids");
+    let n = ids.shape[1];
+
+    let mask_data = []; let type_data = []; let i = 0;
+    while i < n { mask_data.push(1); type_data.push(0); i += 1; }
+
+    let result = infer("ner_model", #{
+        "input_ids": ids,
+        "attention_mask": create_tensor_i64("mask", [1,n], mask_data),
+        "token_type_ids": create_tensor_i64("type", [1,n], type_data),
+    });
+
+    let logits = result.get("logits").as_f64();
+    let labels = ["O","B-PER","I-PER","B-ORG","I-ORG","B-LOC","I-LOC"];
+
+    let output = "";
+    for pos in 1..n-1 {
+        let best = 0; let best_score = logits[pos*7];
+        for j in 1..7 { if logits[pos*7+j] > best_score { best = j; best_score = logits[pos*7+j]; } }
+        if labels[best] != "O" {
+            if output != "" { output += "; "; }
+            output += "token " + pos + " (id=" + ids.as_i64()[pos] + "): " + labels[best];
+        }
+    }
+    return #{ "entities": create_tensor_string("entities", [1], [output]) };
+}
+```
+
+```bash
+# Pre-tokenized IDs from HuggingFace tokenizer
+curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[{"name":"input_ids","shape":[1,13],"datatype":"INT64","data":[2,3222,11,2054,4611,4542,16,2673,11,69,6128,18,3]}]}'
+# Output: "token 1 (id=3222): B-LOC; token 5 (id=4542): B-PER; token 7 (id=2673): B-LOC"
+```
 
 ---
 
