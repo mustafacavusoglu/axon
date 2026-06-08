@@ -1,12 +1,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::collections::HashMap;
 
 use parking_lot::Mutex;
 use rhai::{Dynamic, Engine, Scope, AST};
 use tokio::sync::Semaphore;
 
 use crate::session::pool::SessionPool;
-use crate::tokenizer::Tokenizer;
 use super::types::{InferenceOutput, InputTensor, TensorData};
 
 #[derive(Clone)]
@@ -93,7 +93,7 @@ pub struct RhaiRunner {
     ast: AST,
     semaphore: Arc<Semaphore>,
     script_path: PathBuf,
-    tokenizer: Arc<Mutex<Option<Tokenizer>>>,
+    vocab: Arc<Mutex<Option<HashMap<String, i64>>>>,
 }
 
 impl RhaiRunner {
@@ -107,12 +107,20 @@ impl RhaiRunner {
 
         let script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
-        let tokenizer: Arc<Mutex<Option<Tokenizer>>> = Arc::new(Mutex::new(None));
+        let vocab: Arc<Mutex<Option<HashMap<String, i64>>>> = Arc::new(Mutex::new(None));
         let vocab_path = script_dir.join("vocab.txt");
-        let tokenizer_json_path = script_dir.join("tokenizer.json");
-        if vocab_path.exists() && tokenizer_json_path.exists() {
-            let tok = Tokenizer::load(&vocab_path, &tokenizer_json_path)?;
-            *tokenizer.lock() = Some(tok);
+        if vocab_path.exists() {
+            if let Ok(content) = std::fs::read_to_string(&vocab_path) {
+                let mut map = HashMap::new();
+                for (idx, line) in content.lines().enumerate() {
+                    let token = line.trim();
+                    if !token.is_empty() {
+                        map.insert(token.to_string(), idx as i64);
+                    }
+                }
+                tracing::info!(path = %vocab_path.display(), size = map.len(), "vocab loaded");
+                *vocab.lock() = Some(map);
+            }
         }
 
         let mut engine = Engine::new();
@@ -123,17 +131,17 @@ impl RhaiRunner {
         engine.register_get("shape", |t: &mut RhaiTensor| t.shape.clone());
         engine.register_get("datatype", |t: &mut RhaiTensor| t.datatype.clone());
 
-        engine.register_fn("as_f64", |t: &mut RhaiTensor| -> Result<Vec<Dynamic>, Box<rhai::EvalAltResult>> {
+        engine.register_fn("as_f64", |t: &mut RhaiTensor| -> Vec<Dynamic> {
             match &t.data {
-                RhaiTensorData::F64(d) => Ok(d.iter().map(|&v| Dynamic::from(v)).collect()),
-                _ => Err("tensor is not FP32/FP64".into()),
+                RhaiTensorData::F64(d) => d.iter().map(|&v| Dynamic::from(v)).collect(),
+                _ => vec![],
             }
         });
 
-        engine.register_fn("as_i64", |t: &mut RhaiTensor| -> Result<Vec<Dynamic>, Box<rhai::EvalAltResult>> {
+        engine.register_fn("as_i64", |t: &mut RhaiTensor| -> Vec<Dynamic> {
             match &t.data {
-                RhaiTensorData::I64(d) => Ok(d.iter().map(|&v| Dynamic::from(v)).collect()),
-                _ => Err("tensor is not INT64".into()),
+                RhaiTensorData::I64(d) => d.iter().map(|&v| Dynamic::from(v)).collect(),
+                _ => vec![],
             }
         });
 
@@ -202,40 +210,79 @@ impl RhaiRunner {
             }
         );
 
-        let tokenizer_ref = tokenizer.clone();
-        engine.register_fn("tokenize", move |text: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
-            let tok_guard = tokenizer_ref.lock();
-            let tok = tok_guard.as_ref()
-                .ok_or_else(|| "tokenizer not loaded (vocab.txt/tokenizer.json not found)".to_string())?;
-            let (input_ids, attention_mask, token_type_ids) = tok.encode(text);
-            drop(tok_guard);
+        let vocab_clone = vocab.clone();
+        engine.register_fn("vocab_id", move |token: &str| -> i64 {
+            if let Some(ref map) = *vocab_clone.lock() {
+                map.get(token).copied().unwrap_or(0)
+            } else {
+                0
+            }
+        });
 
-            let seq_len = input_ids.len() as i64;
+        let vocab_has = vocab.clone();
+        engine.register_fn("vocab_has", move |token: &str| -> bool {
+            if let Some(ref map) = *vocab_has.lock() {
+                map.contains_key(token)
+            } else {
+                false
+            }
+        });
 
-            let ids_tensor = RhaiTensor {
-                name: "input_ids".to_string(),
-                shape: vec![1, seq_len],
-                datatype: "INT64".to_string(),
-                data: RhaiTensorData::I64(input_ids),
-            };
-            let mask_tensor = RhaiTensor {
-                name: "attention_mask".to_string(),
-                shape: vec![1, seq_len],
-                datatype: "INT64".to_string(),
-                data: RhaiTensorData::I64(attention_mask),
-            };
-            let type_tensor = RhaiTensor {
-                name: "token_type_ids".to_string(),
-                shape: vec![1, seq_len],
-                datatype: "INT64".to_string(),
-                data: RhaiTensorData::I64(token_type_ids),
-            };
+        let vocab_unka = vocab.clone();
+        engine.register_fn("unk_id", move || -> i64 {
+            if let Some(ref map) = *vocab_unka.lock() {
+                map.get("[UNK]").copied().unwrap_or(0)
+            } else {
+                0
+            }
+        });
 
-            let mut result = rhai::Map::new();
-            result.insert("input_ids".into(), Dynamic::from(ids_tensor));
-            result.insert("attention_mask".into(), Dynamic::from(mask_tensor));
-            result.insert("token_type_ids".into(), Dynamic::from(type_tensor));
-            Ok(result)
+        let vocab_clsa = vocab.clone();
+        engine.register_fn("cls_id", move || -> i64 {
+            if let Some(ref map) = *vocab_clsa.lock() {
+                map.get("[CLS]").copied().unwrap_or(0)
+            } else {
+                0
+            }
+        });
+
+        let vocab_sepa = vocab.clone();
+        engine.register_fn("sep_id", move || -> i64 {
+            if let Some(ref map) = *vocab_sepa.lock() {
+                map.get("[SEP]").copied().unwrap_or(0)
+            } else {
+                0
+            }
+        });
+
+        engine.register_fn("substr", |s: &str, start: i64, len: i64| -> String {
+            let start = start.max(0) as usize;
+            let end = (start + len.max(0) as usize).min(s.len());
+            s[start..end].to_string()
+        });
+
+        engine.register_fn("split_text", |text: &str| -> Vec<Dynamic> {
+            let mut words: Vec<Dynamic> = Vec::new();
+            let mut current = String::new();
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    if !current.is_empty() {
+                        words.push(current.clone().into());
+                        current.clear();
+                    }
+                } else if ch.is_ascii_punctuation() && ch != '-' && ch != '#' {
+                    if !current.is_empty() {
+                        words.push(current.clone().into());
+                        current.clear();
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            if !current.is_empty() {
+                words.push(current.into());
+            }
+            words
         });
 
         let bls_pool = pool.clone();
@@ -243,10 +290,10 @@ impl RhaiRunner {
             let mut input_tensors: Vec<(String, InputTensor)> = Vec::new();
             for (key, value) in inputs {
                 let tensor: RhaiTensor = if value.is::<RhaiTensor>() {
-                value.cast::<RhaiTensor>()
-            } else {
-                return Err(format!("expected Tensor for input '{}', got {:?}", key, value.type_name()).into());
-            };
+                    value.cast::<RhaiTensor>()
+                } else {
+                    return Err(format!("expected Tensor for input '{}', got {:?}", key, value.type_name()).into());
+                };
                 input_tensors.push((key.to_string(), tensor.into_input()));
             }
 
@@ -278,7 +325,7 @@ impl RhaiRunner {
             ast,
             semaphore: Arc::new(Semaphore::new(concurrency.max(1))),
             script_path: script_path.to_path_buf(),
-            tokenizer,
+            vocab,
         })
     }
 
