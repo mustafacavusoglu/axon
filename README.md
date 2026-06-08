@@ -41,7 +41,7 @@ axon-server \
 ### Docker
 ```bash
 docker run -v ./models:/models -p 8000:8000 -p 8001:8001 -p 8002:8002 \
-  mustdo12/axon-server:0.2.0 \
+  mustdo12/axon-server:0.3.0 \
   --model-repository=/models \
   --model-control-mode=poll
 ```

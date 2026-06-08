@@ -134,7 +134,7 @@ pub fn init() {
     registry();
     START_TIME.get_or_init(Instant::now);
     if let Some(up) = UPTIME_SECONDS.get() {
-        up.with_label_values(&["0.2.0"]).set(1.0);
+            up.with_label_values(&["0.3.0"]).set(1.0);
     }
 }
 

@@ -90,7 +90,7 @@ struct ServerMetadataResponse {
 async fn server_metadata() -> Json<ServerMetadataResponse> {
     Json(ServerMetadataResponse {
         name: "axon-server".to_string(),
-        version: "0.2.0".to_string(),
+        version: "0.3.0".to_string(),
         extensions: vec![],
     })
 }

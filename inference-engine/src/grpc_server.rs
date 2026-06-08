@@ -93,7 +93,7 @@ impl GrpcInferenceService for KfsService {
     ) -> Result<Response<ServerMetadataResponse>, Status> {
         Ok(Response::new(ServerMetadataResponse {
             name: "axon-server".to_string(),
-            version: "0.2.0".to_string(),
+            version: "0.3.0".to_string(),
         }))
     }
 
