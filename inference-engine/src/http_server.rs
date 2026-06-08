@@ -258,7 +258,7 @@ struct InferOutputResponse {
     name: String,
     shape: Vec<i64>,
     datatype: String,
-    data: Vec<f64>,
+    data: serde_json::Value,
 }
 
 async fn infer(
@@ -347,15 +347,18 @@ async fn run_inference(
         .into_iter()
         .map(|(name, shape, tensor_data)| {
             let dtype = tensor_data.dtype_str().to_string();
-            let data = match tensor_data {
+            let data: serde_json::Value = match tensor_data {
                 crate::session::types::TensorData::F32(d) => {
-                    d.into_iter().map(|v| v as f64).collect()
+                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
                 }
                 crate::session::types::TensorData::I32(d) => {
-                    d.into_iter().map(|v| v as f64).collect()
+                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
                 }
                 crate::session::types::TensorData::I64(d) => {
-                    d.into_iter().map(|v| v as f64).collect()
+                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
+                }
+                crate::session::types::TensorData::String(d) => {
+                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
                 }
             };
             InferOutputResponse {

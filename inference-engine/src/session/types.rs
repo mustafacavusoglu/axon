@@ -13,6 +13,7 @@ pub enum TensorData {
     F32(Vec<f32>),
     I32(Vec<i32>),
     I64(Vec<i64>),
+    String(Vec<String>),
 }
 
 impl TensorData {
@@ -39,6 +40,9 @@ impl TensorData {
                 }
                 buf
             }
+            TensorData::String(data) => {
+                data.join("").into_bytes()
+            }
         }
     }
 
@@ -47,6 +51,7 @@ impl TensorData {
             TensorData::F32(_) => "FP32",
             TensorData::I32(_) => "INT32",
             TensorData::I64(_) => "INT64",
+            TensorData::String(_) => "BYTES",
         }
     }
 
@@ -55,6 +60,7 @@ impl TensorData {
             TensorData::F32(d) => d.iter().map(|&v| v as f64).collect(),
             TensorData::I32(d) => d.iter().map(|&v| v as f64).collect(),
             TensorData::I64(d) => d.iter().map(|&v| v as f64).collect(),
+            TensorData::String(_) => vec![],
         }
     }
 
@@ -63,6 +69,7 @@ impl TensorData {
             TensorData::F32(d) => d.iter().map(|&v| v as i64).collect(),
             TensorData::I32(d) => d.iter().map(|&v| v as i64).collect(),
             TensorData::I64(d) => d.clone(),
+            TensorData::String(_) => vec![],
         }
     }
 }

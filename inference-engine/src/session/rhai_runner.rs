@@ -56,7 +56,7 @@ impl RhaiTensor {
             RhaiTensorData::I64(d) => (self.shape, TensorData::I64(d)),
             RhaiTensorData::String(d) => {
                 let len = d.len() as i64;
-                (vec![len], TensorData::I32(vec![d.len() as i32]))
+                (vec![len], TensorData::String(d))
             }
         }
     }
@@ -76,6 +76,7 @@ impl RhaiTensor {
             TensorData::F32(d) => RhaiTensorData::F64(d.into_iter().map(|v| v as f64).collect()),
             TensorData::I32(d) => RhaiTensorData::I64(d.into_iter().map(|v| v as i64).collect()),
             TensorData::I64(d) => RhaiTensorData::I64(d),
+            TensorData::String(d) => RhaiTensorData::String(d),
         };
         RhaiTensor {
             name,
@@ -192,6 +193,60 @@ impl RhaiRunner {
                 }
             }
         );
+
+        engine.register_fn("create_tensor_string",
+            |name: &str, shape: rhai::Array, data: rhai::Array| -> RhaiTensor {
+                let shape_i64: Vec<i64> = shape.iter().map(|v| v.as_int().unwrap_or(1)).collect();
+                let strings: Vec<String> = data.iter().map(|v| v.clone().into_string().unwrap_or_default()).collect();
+                RhaiTensor {
+                    name: name.to_string(),
+                    shape: shape_i64,
+                    datatype: "BYTES".to_string(),
+                    data: RhaiTensorData::String(strings),
+                }
+            }
+        );
+
+        let script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+        let vocab_dir = script_dir.clone();
+        engine.register_fn("read_lines", move |path: &str| -> Vec<Dynamic> {
+            let full_path = vocab_dir.join(path);
+            let mut lines = Vec::new();
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        lines.push(Dynamic::from(trimmed.to_string()));
+                    }
+                }
+            }
+            lines
+        });
+
+        engine.register_fn("split_words", |text: &str| -> Vec<Dynamic> {
+            let mut words: Vec<Dynamic> = Vec::new();
+            let mut current = String::new();
+            for ch in text.chars() {
+                if ch.is_whitespace() {
+                    if !current.is_empty() {
+                        words.push(current.clone().into());
+                        current.clear();
+                    }
+                } else if ch.is_ascii_punctuation() && ch != '-' && ch != '#' {
+                    if !current.is_empty() {
+                        words.push(current.clone().into());
+                        current.clear();
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            if !current.is_empty() {
+                words.push(current.into());
+            }
+            words
+        });
 
         let bls_pool = pool.clone();
         engine.register_fn("infer", move |model_name: &str, inputs: rhai::Map| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
