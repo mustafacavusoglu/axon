@@ -7,7 +7,6 @@ on:
       - '**.md'
       - '**.pbtxt'
       - '**.yaml'
-      - '**.yml'
       - 'plan.md'
       - '.gitignore'
 
