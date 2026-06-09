@@ -1,0 +1,17 @@
+name: decoder
+platform: script
+max_batch_size: 1
+
+inputs:
+  - name: logits
+    data_type: TYPE_FP32
+    dims: [1, -1, 7]
+
+outputs:
+  - name: entities
+    data_type: TYPE_STRING
+    dims: [1]
+
+instance_groups:
+  - count: 2
+    kind: KIND_CPU

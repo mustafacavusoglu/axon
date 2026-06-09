@@ -13,6 +13,7 @@ services:
       - ./ml_model/xgb_housing:/models/xgb_housing:ro
       - ./nlp_model/tokenizer:/models/tokenizer:ro
       - ./nlp_model/ner_model:/models/ner_model:ro
+      - ./nlp_model/decoder:/models/decoder:ro
       - ./nlp_model/pipeline:/models/pipeline:ro
     command:
       - "--model-repository=/models"
