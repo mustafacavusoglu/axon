@@ -143,12 +143,50 @@ jobs:
             ${IMAGE}:${VERSION}-amd64 \
             ${IMAGE}:${VERSION}-arm64
 
-  release:
+  release-build:
     needs: [changes, test]
     if: |
       needs.test.result == 'success'
       && needs.changes.outputs.src == 'true'
       && github.event_name == 'push'
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            suffix: amd64
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
+            suffix: arm64
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev
+
+      - name: Build release binary
+        run: cargo build --release --target ${{ matrix.target }}
+        working-directory: inference-engine
+
+      - name: Rename binary
+        run: |
+          mv target/${{ matrix.target }}/release/axon-server axon-server-linux-${{ matrix.suffix }}
+        working-directory: inference-engine
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: binary-${{ matrix.suffix }}
+          path: inference-engine/axon-server-linux-${{ matrix.suffix }}
+
+  release:
+    needs: [release-build]
     runs-on: ubuntu-latest
     environment: docker-env
     permissions:
@@ -156,27 +194,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-
-      - name: Install cross-compilation deps
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            protobuf-compiler libssl-dev \
-            gcc-aarch64-linux-gnu
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            inference-engine/target
-          key: ${{ runner.os }}-cargo-release-${{ hashFiles('inference-engine/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-release-
+          pattern: binary-*
+          merge-multiple: true
+          path: release
 
       - name: Extract version
         id: ver
@@ -184,28 +207,12 @@ jobs:
           VERSION=$(grep '^version' inference-engine/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Build amd64 binary
-        run: cargo build --release --target x86_64-unknown-linux-gnu
-        working-directory: inference-engine
-
-      - name: Build arm64 binary
-        env:
-          CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: aarch64-linux-gnu-gcc
-        run: cargo build --release --target aarch64-unknown-linux-gnu
-        working-directory: inference-engine
-
-      - name: Rename binaries
-        run: |
-          mv target/x86_64-unknown-linux-gnu/release/axon-server axon-server-linux-amd64
-          mv target/aarch64-unknown-linux-gnu/release/axon-server axon-server-linux-arm64
-        working-directory: inference-engine
-
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.ver.outputs.version }}
           name: v${{ steps.ver.outputs.version }}
           files: |
-            inference-engine/axon-server-linux-amd64
-            inference-engine/axon-server-linux-arm64
+            release/axon-server-linux-amd64
+            release/axon-server-linux-arm64
           generate_release_notes: true
