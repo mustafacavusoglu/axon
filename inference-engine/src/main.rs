@@ -40,10 +40,12 @@ fn init_tracing() -> Option<SdkTracerProvider> {
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
     tracing_subscriber::registry()
+        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .with(
-            EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+            tracing_subscriber::fmt::layer()
+                .json()
+                .with_current_span(true),
         )
-        .with(tracing_subscriber::fmt::layer().json().with_current_span(true))
         .with(otel_layer)
         .init();
 
@@ -56,10 +58,12 @@ fn main() -> anyhow::Result<()> {
     let provider = init_tracing();
     if provider.is_none() {
         tracing_subscriber::registry()
+            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
             .with(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")),
+                tracing_subscriber::fmt::layer()
+                    .json()
+                    .with_current_span(true),
             )
-            .with(tracing_subscriber::fmt::layer().json().with_current_span(true))
             .init();
     }
 

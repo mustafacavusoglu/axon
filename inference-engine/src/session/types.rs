@@ -41,9 +41,7 @@ impl TensorData {
                 }
                 buf
             }
-            TensorData::String(data) => {
-                data.join("").into_bytes()
-            }
+            TensorData::String(data) => data.join("").into_bytes(),
         }
     }
 
@@ -119,9 +117,7 @@ impl InputTensor {
 }
 
 #[allow(dead_code)]
-pub fn input_tensors_to_map(
-    inputs: Vec<(String, InputTensor)>,
-) -> HashMap<String, InputTensor> {
+pub fn input_tensors_to_map(inputs: Vec<(String, InputTensor)>) -> HashMap<String, InputTensor> {
     let mut map = HashMap::new();
     for (name, tensor) in inputs {
         map.insert(name, tensor);

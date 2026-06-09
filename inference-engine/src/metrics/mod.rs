@@ -29,7 +29,10 @@ fn registry() -> &'static Registry {
 
         // Request counter with model + HTTP status labels
         let c = IntCounterVec::new(
-            prometheus::opts!("axon_requests_total", "total inference requests by model and status"),
+            prometheus::opts!(
+                "axon_requests_total",
+                "total inference requests by model and status"
+            ),
             &["model", "status"],
         )
         .expect("valid descriptor");
@@ -44,7 +47,10 @@ fn registry() -> &'static Registry {
 
         // Per-model info gauge (for Grafana model inventory)
         let m = IntGaugeVec::new(
-            prometheus::opts!("axon_model_info", "loaded model versions (1=ready, 0=unloaded)"),
+            prometheus::opts!(
+                "axon_model_info",
+                "loaded model versions (1=ready, 0=unloaded)"
+            ),
             &["model", "version"],
         )
         .expect("valid descriptor");
@@ -66,7 +72,10 @@ fn registry() -> &'static Registry {
 
         // In-flight requests per model
         let inf = IntGaugeVec::new(
-            prometheus::opts!("axon_inflight_requests", "number of currently processing requests per model"),
+            prometheus::opts!(
+                "axon_inflight_requests",
+                "number of currently processing requests per model"
+            ),
             &["model"],
         )
         .expect("valid descriptor");
@@ -101,7 +110,10 @@ fn registry() -> &'static Registry {
 
         // Model load errors
         let mle = IntCounterVec::new(
-            prometheus::opts!("axon_model_load_errors_total", "number of model load failures"),
+            prometheus::opts!(
+                "axon_model_load_errors_total",
+                "number of model load failures"
+            ),
             &["model"],
         )
         .expect("valid descriptor");
@@ -134,7 +146,7 @@ pub fn init() {
     registry();
     START_TIME.get_or_init(Instant::now);
     if let Some(up) = UPTIME_SECONDS.get() {
-            up.with_label_values(&["0.3.0"]).set(1.0);
+        up.with_label_values(&["0.3.0"]).set(1.0);
     }
 }
 

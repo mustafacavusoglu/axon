@@ -183,10 +183,12 @@ impl SessionPool {
         let mut latest: Option<Arc<ModelSession>> = None;
         for entry in self.sessions.iter() {
             let s = entry.value();
-            if s.name == name && s.state == SessionState::Ready
-                && latest.as_ref().is_none_or(|l| s.version > l.version) {
-                    latest = Some(s.clone());
-                }
+            if s.name == name
+                && s.state == SessionState::Ready
+                && latest.as_ref().is_none_or(|l| s.version > l.version)
+            {
+                latest = Some(s.clone());
+            }
         }
         latest
     }

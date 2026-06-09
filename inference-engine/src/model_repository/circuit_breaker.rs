@@ -17,16 +17,18 @@ impl CircuitBreaker {
 
     pub fn is_open(&self, key: &str) -> bool {
         if let Some((count, last_fail)) = self.failures.get(key) {
-            if *count >= MAX_FAILURES
-                && last_fail.elapsed() < RESET_TIMEOUT {
-                    return true;
-                }
+            if *count >= MAX_FAILURES && last_fail.elapsed() < RESET_TIMEOUT {
+                return true;
+            }
         }
         false
     }
 
     pub fn record_failure(&mut self, key: &str) {
-        let entry = self.failures.entry(key.to_string()).or_insert((0, Instant::now()));
+        let entry = self
+            .failures
+            .entry(key.to_string())
+            .or_insert((0, Instant::now()));
         entry.0 += 1;
         entry.1 = Instant::now();
     }

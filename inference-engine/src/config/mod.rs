@@ -3,7 +3,11 @@ use std::path::PathBuf;
 use clap::Parser;
 
 #[derive(Parser, Debug, Clone)]
-#[command(name = "axon-server", version = "0.2.0", about = "Axon Inference Server — CPU ONNX serving")]
+#[command(
+    name = "axon-server",
+    version = "0.2.0",
+    about = "Axon Inference Server — CPU ONNX serving"
+)]
 pub struct ServerConfig {
     #[arg(long, default_value = "/models")]
     pub model_repository: PathBuf,

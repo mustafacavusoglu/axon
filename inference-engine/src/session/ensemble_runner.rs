@@ -18,7 +18,11 @@ pub struct EnsembleRunner {
 }
 
 impl EnsembleRunner {
-    pub fn load(config: &ModelConfig, pool: SessionPool, concurrency: usize) -> anyhow::Result<Self> {
+    pub fn load(
+        config: &ModelConfig,
+        pool: SessionPool,
+        concurrency: usize,
+    ) -> anyhow::Result<Self> {
         let scheduling = config
             .ensemble_scheduling
             .as_ref()
@@ -58,14 +62,12 @@ impl EnsembleRunner {
         for (model_name, input_map, output_map) in &self.steps {
             let mut step_inputs = Vec::new();
             for kv in input_map {
-                let tensor = tensor_map
-                    .get(&kv.value)
-                    .with_context(|| {
-                        format!(
-                            "missing tensor '{}' required by step '{}' input '{}'",
-                            kv.value, model_name, kv.key
-                        )
-                    })?;
+                let tensor = tensor_map.get(&kv.value).with_context(|| {
+                    format!(
+                        "missing tensor '{}' required by step '{}' input '{}'",
+                        kv.value, model_name, kv.key
+                    )
+                })?;
                 step_inputs.push((kv.key.clone(), tensor.clone()));
             }
 
@@ -97,18 +99,22 @@ impl EnsembleRunner {
                 .with_context(|| format!("missing final output tensor '{output_name}'"))?;
 
             let (shape, data) = match tensor {
-                InputTensor::F32(d, s) => {
-                    (s.iter().map(|n| *n as i64).collect(), TensorData::F32(d.clone()))
-                }
-                InputTensor::I32(d, s) => {
-                    (s.iter().map(|n| *n as i64).collect(), TensorData::I32(d.clone()))
-                }
-                InputTensor::I64(d, s) => {
-                    (s.iter().map(|n| *n as i64).collect(), TensorData::I64(d.clone()))
-                }
-                InputTensor::String(d, s) => {
-                    (s.iter().map(|n| *n as i64).collect(), TensorData::String(d.clone()))
-                }
+                InputTensor::F32(d, s) => (
+                    s.iter().map(|n| *n as i64).collect(),
+                    TensorData::F32(d.clone()),
+                ),
+                InputTensor::I32(d, s) => (
+                    s.iter().map(|n| *n as i64).collect(),
+                    TensorData::I32(d.clone()),
+                ),
+                InputTensor::I64(d, s) => (
+                    s.iter().map(|n| *n as i64).collect(),
+                    TensorData::I64(d.clone()),
+                ),
+                InputTensor::String(d, s) => (
+                    s.iter().map(|n| *n as i64).collect(),
+                    TensorData::String(d.clone()),
+                ),
             };
             result.push((output_name.clone(), shape, data));
         }

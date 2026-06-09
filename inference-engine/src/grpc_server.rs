@@ -109,9 +109,7 @@ impl GrpcInferenceService for KfsService {
 
         let config_path = self.repo_path.join(&req.name).join("config.pbtxt");
         let (inputs, outputs, platform) = if let Ok(content) = std::fs::read(&config_path) {
-            if let Ok(cfg) =
-                crate::model_repository::config_parser::parse_model_config(&content)
-            {
+            if let Ok(cfg) = crate::model_repository::config_parser::parse_model_config(&content) {
                 let ins: Vec<TensorMetadata> = cfg
                     .inputs
                     .iter()
@@ -170,14 +168,10 @@ impl GrpcInferenceService for KfsService {
         })?;
 
         let queue_start = Instant::now();
-        let _permit = session
-            .concurrency()
-            .acquire()
-            .await
-            .map_err(|_| {
-                metrics::record_request(&req.model_name, "503");
-                Status::resource_exhausted("concurrency limit")
-            })?;
+        let _permit = session.concurrency().acquire().await.map_err(|_| {
+            metrics::record_request(&req.model_name, "503");
+            Status::resource_exhausted("concurrency limit")
+        })?;
         metrics::record_queue_wait(&req.model_name, queue_start.elapsed().as_secs_f64());
         metrics::inc_inflight(&req.model_name);
 
@@ -312,9 +306,7 @@ fn parse_grpc_inputs(inputs: &[InferInput]) -> Result<Vec<(String, InputTensor)>
                 let ints: Vec<i64> = inp
                     .raw_data
                     .chunks_exact(8)
-                    .map(|c| {
-                        i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]])
-                    })
+                    .map(|c| i64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], c[5], c[6], c[7]]))
                     .collect();
                 InputTensor::I64(ints, shape)
             }

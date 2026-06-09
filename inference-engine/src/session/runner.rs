@@ -23,12 +23,20 @@ impl ModelRunner {
         Ok(ModelRunner::Onnx(Arc::new(runner)))
     }
 
-    pub fn load_rhai(script_path: &Path, pool: SessionPool, concurrency: usize) -> anyhow::Result<Self> {
+    pub fn load_rhai(
+        script_path: &Path,
+        pool: SessionPool,
+        concurrency: usize,
+    ) -> anyhow::Result<Self> {
         let runner = RhaiRunner::load(script_path, pool, concurrency)?;
         Ok(ModelRunner::Rhai(Arc::new(runner)))
     }
 
-    pub fn load_ensemble(config: &ModelConfig, pool: SessionPool, concurrency: usize) -> anyhow::Result<Self> {
+    pub fn load_ensemble(
+        config: &ModelConfig,
+        pool: SessionPool,
+        concurrency: usize,
+    ) -> anyhow::Result<Self> {
         let runner = EnsembleRunner::load(config, pool, concurrency)?;
         Ok(ModelRunner::Ensemble(Arc::new(runner)))
     }

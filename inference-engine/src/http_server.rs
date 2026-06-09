@@ -76,7 +76,10 @@ async fn health_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     if state.pool.model_count() > 0 {
         (StatusCode::OK, Json(serde_json::json!({"ready": true})))
     } else {
-        (StatusCode::SERVICE_UNAVAILABLE, Json(serde_json::json!({"ready": false})))
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({"ready": false})),
+        )
     }
 }
 
@@ -293,15 +296,11 @@ async fn run_inference(
     req: InferRequest,
 ) -> Result<impl IntoResponse, StatusCode> {
     let queue_start = Instant::now();
-    let _permit = session
-        .concurrency()
-        .acquire()
-        .await
-        .map_err(|e| {
-            tracing::warn!(error = %e, "concurrency limit reached");
-            metrics::record_request(&model_name, "503");
-            StatusCode::SERVICE_UNAVAILABLE
-        })?;
+    let _permit = session.concurrency().acquire().await.map_err(|e| {
+        tracing::warn!(error = %e, "concurrency limit reached");
+        metrics::record_request(&model_name, "503");
+        StatusCode::SERVICE_UNAVAILABLE
+    })?;
     metrics::record_queue_wait(&model_name, queue_start.elapsed().as_secs_f64());
     metrics::inc_inflight(&model_name);
 
@@ -383,7 +382,11 @@ fn parse_http_inputs(inputs: &[InferInputRequest]) -> anyhow::Result<Vec<(String
 
     for inp in inputs {
         let shape: Vec<usize> = inp.shape.iter().map(|&d| d as usize).collect();
-        let total: usize = shape.iter().copied().reduce(|a, b| a.saturating_mul(b)).unwrap_or(0);
+        let total: usize = shape
+            .iter()
+            .copied()
+            .reduce(|a, b| a.saturating_mul(b))
+            .unwrap_or(0);
 
         let tensor = match inp.datatype.as_str() {
             "FP32" | "FLOAT32" => {

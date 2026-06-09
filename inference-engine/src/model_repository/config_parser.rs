@@ -68,7 +68,9 @@ pub struct InstanceGroup {
     pub kind: String,
 }
 
-fn default_count() -> i32 { 2 }
+fn default_count() -> i32 {
+    2
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct DynamicBatching {
@@ -94,7 +96,9 @@ pub struct EnsembleStep {
     pub output_map: Vec<KeyValue>,
 }
 
-fn default_model_version() -> i32 { -1 }
+fn default_model_version() -> i32 {
+    -1
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct EnsembleScheduling {
@@ -118,8 +122,12 @@ pub struct ModelConfig {
     pub ensemble_scheduling: Option<EnsembleScheduling>,
 }
 
-fn default_platform() -> String { "onnxruntime_onnx".to_string() }
-fn default_batch_size() -> i32 { 1 }
+fn default_platform() -> String {
+    "onnxruntime_onnx".to_string()
+}
+fn default_batch_size() -> i32 {
+    1
+}
 
 pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
     let text = std::str::from_utf8(content)?;
@@ -182,7 +190,9 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
                         "step" => {
                             if in_list {
                                 if let Some(step) = current_step.take() {
-                                    let ens = cfg.ensemble_scheduling.get_or_insert(EnsembleScheduling { steps: Vec::new() });
+                                    let ens = cfg
+                                        .ensemble_scheduling
+                                        .get_or_insert(EnsembleScheduling { steps: Vec::new() });
                                     ens.steps.push(step);
                                 }
                                 current_step = Some(EnsembleStep {
@@ -201,7 +211,9 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
                         let popped = section_stack.pop().unwrap();
                         if popped == "step" {
                             if let Some(step) = current_step.take() {
-                                let ens = cfg.ensemble_scheduling.get_or_insert(EnsembleScheduling { steps: Vec::new() });
+                                let ens = cfg
+                                    .ensemble_scheduling
+                                    .get_or_insert(EnsembleScheduling { steps: Vec::new() });
                                 ens.steps.push(step);
                             }
                         }
@@ -613,7 +625,10 @@ instance_group {
         assert_eq!(cfg.outputs.len(), 1);
         assert_eq!(cfg.outputs[0].name, "result");
 
-        let ens = cfg.ensemble_scheduling.as_ref().expect("ensemble_scheduling should be present");
+        let ens = cfg
+            .ensemble_scheduling
+            .as_ref()
+            .expect("ensemble_scheduling should be present");
         assert_eq!(ens.steps.len(), 2);
 
         let s0 = &ens.steps[0];
@@ -712,7 +727,10 @@ instance_group {
         assert_eq!(cfg.name, "ensemble_list");
         assert_eq!(cfg.platform, "ensemble");
 
-        let ens = cfg.ensemble_scheduling.as_ref().expect("ensemble_scheduling should be present");
+        let ens = cfg
+            .ensemble_scheduling
+            .as_ref()
+            .expect("ensemble_scheduling should be present");
         assert_eq!(ens.steps.len(), 2);
 
         let s0 = &ens.steps[0];
@@ -836,7 +854,10 @@ instance_groups:
         assert_eq!(cfg.name, "ensemble_yaml");
         assert_eq!(cfg.platform, "ensemble");
 
-        let ens = cfg.ensemble_scheduling.as_ref().expect("ensemble_scheduling should be present");
+        let ens = cfg
+            .ensemble_scheduling
+            .as_ref()
+            .expect("ensemble_scheduling should be present");
         assert_eq!(ens.steps.len(), 2);
 
         let s0 = &ens.steps[0];
@@ -939,7 +960,10 @@ instance_group {
         let cfg = parse_model_config(content).unwrap();
         assert_eq!(cfg.name, "ensemble_step_list");
 
-        let ens = cfg.ensemble_scheduling.as_ref().expect("ensemble_scheduling should be present");
+        let ens = cfg
+            .ensemble_scheduling
+            .as_ref()
+            .expect("ensemble_scheduling should be present");
         assert_eq!(ens.steps.len(), 2);
 
         let s0 = &ens.steps[0];

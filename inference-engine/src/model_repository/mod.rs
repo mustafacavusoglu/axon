@@ -90,9 +90,7 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
             }
 
             if platform == "script" {
-                let script_file = model_dir
-                    .join(version.to_string())
-                    .join("model.rhai");
+                let script_file = model_dir.join(version.to_string()).join("model.rhai");
                 if !script_file.exists() {
                     tracing::warn!(model = %model_name, version, "model.rhai not found, skipping");
                     continue;
