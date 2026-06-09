@@ -376,46 +376,42 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
   ]}'
 ```
 
-### Ornek 2: NLP NER Pipeline (BLS — tokenize + decode)
+### Ornek 2: NLP NER Pipeline (BLS — uc model zinciri)
 
-`nlp_model/ner_pipeline/1/model.rhai` — onceden tokenize edilmis input_ids alir, attention mask ekler, BERT modeline BLS yapar, logits'leri cozup entity etiketlerini dondurur:
+`nlp_model/` altinda BLS ve ensemble zincirlemeyi gosteren dort model bulunur:
+
+| Model | Tip | Aciklama |
+|-------|-----|----------|
+| `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids |
+| `ner_model` | ONNX | BERT tabanli NER (3 token girdisi → logits) |
+| `ner_pipeline` | Script (BLS) | `infer("tokenizer")` → `infer("ner_model")` → decode |
+| `pipeline` | Ensemble | Declarative: tokenizer → ner_model (script gerektirmez) |
+
+**ner_pipeline `model.rhai`** — tokenizer ve ner_model'i BLS ile cagirir:
 
 ```rhai
 fn execute(inputs) {
-    let ids = inputs.get("input_ids");
-    let n = ids.shape[1];
-
-    let mask_data = []; let type_data = []; let i = 0;
-    while i < n { mask_data.push(1); type_data.push(0); i += 1; }
+    let tokenized = infer("tokenizer", #{ "text": inputs.get("text") });
 
     let result = infer("ner_model", #{
-        "input_ids": ids,
-        "attention_mask": create_tensor_i64("mask", [1,n], mask_data),
-        "token_type_ids": create_tensor_i64("type", [1,n], type_data),
+        "input_ids": tokenized.get("input_ids"),
+        "attention_mask": tokenized.get("attention_mask"),
+        "token_type_ids": tokenized.get("token_type_ids"),
     });
 
     let logits = result.get("logits").as_f64();
     let labels = ["O","B-PER","I-PER","B-ORG","I-ORG","B-LOC","I-LOC"];
-
-    let output = "";
-    for pos in 1..n-1 {
-        let best = 0; let best_score = logits[pos*7];
-        for j in 1..7 { if logits[pos*7+j] > best_score { best = j; best_score = logits[pos*7+j]; } }
-        if labels[best] != "O" {
-            if output != "" { output += "; "; }
-            output += "token " + pos + " (id=" + ids.as_i64()[pos] + "): " + labels[best];
-        }
-    }
+    // ... entity decode
     return #{ "entities": create_tensor_string("entities", [1], [output]) };
 }
 ```
 
 ```bash
-# HuggingFace tokenizer ile onceden tokenize edilmis ID'ler
+# Duzyazi girdisi — tokenizer vocab lookup'i inline yapar
 curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
   -H 'Content-Type: application/json' \
-  -d '{"inputs":[{"name":"input_ids","shape":[1,13],"datatype":"INT64","data":[2,3222,11,2054,4611,4542,16,2673,11,69,6128,18,3]}]}'
-# Cikti: "token 1 (id=3222): B-LOC; token 5 (id=4542): B-PER; token 7 (id=2673): B-LOC"
+  -d '{"inputs":[{"name":"text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
+# Cikti: "token 1 (id=7255): B-PER; token 4 (id=7700): B-LOC"
 ```
 
 ---
@@ -425,24 +421,22 @@ curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
 Declarative model zincirleme — `config.pbtxt` / `config.yaml` ile, **hic script yazmadan**.  
 `platform: "ensemble"` kullanip, `ensemble_scheduling` adimlarini `input_map` / `output_map` ile tanimlarsiniz.
 
-Her adim, tensor'lari modeller arasi aktarir: bir step'in ciktisi sonraki step'in girdisine map'lenir.
-
 ### Ornek: NLP Pipeline (tokenizer → NER)
 
-`nlp_model/nlp_ensemble/config.pbtxt` — tokenizer ciktisini NER modeline zincirleyen 2 adimli ensemble:
+`nlp_model/pipeline/config.pbtxt` — `tokenizer` ve `ner_model`'i (repo'da gercekten var olan modeller) zincirler:
 
 ```protobuf
-name: "nlp_ensemble"
+name: "pipeline"
 platform: "ensemble"
 max_batch_size: 1
 
 input  { name: "raw_text"  data_type: TYPE_STRING  dims: [1] }
-output { name: "entities"  data_type: TYPE_STRING  dims: [1] }
+output { name: "entities"  data_type: TYPE_FP32     dims: [1, -1, 7] }
 
 ensemble_scheduling {
   step [
     {   # Adim 1: Text → token ID'leri + attention mask
-      model_name: "tokenizer_model"
+      model_name: "tokenizer"
       model_version: -1
       input_map  [ { key: "text"  value: "raw_text" } ]
       output_map [
@@ -463,19 +457,25 @@ ensemble_scheduling {
     }
   ]
 }
-
-instance_group { count: 1  kind: KIND_CPU }
 ```
 
-YAML daha okunabilir:
-```yaml
-ensemble_scheduling:
-  steps:
-    - model_name: tokenizer_model
-      input_map: [{ key: text, value: raw_text }]
-      output_map:
-        - { key: input_ids, value: ids }
-        - { key: attention_mask, value: mask }
+### BLS vs Ensemble karsilastirmasi
+
+| | BLS (ner_pipeline) | Ensemble (pipeline) |
+|---|---|---|
+| Yontem | Rhai script icinde `infer()` | Declarative config |
+| Tokenizer | `infer("tokenizer", ...)` | Adim 1: tokenizer modeli |
+| NER | `infer("ner_model", ...)` | Adim 2: ner_model |
+| Decode | Rhai script (logits → string) | Yok (ham logits) |
+| Script gerekir mi | Evet | **Hayir** |
+
+### Dizin yapisi
+```
+nlp_model/
+├── tokenizer/           # script — text → token ID'leri
+├── ner_model/           # ONNX — BERT NER
+├── ner_pipeline/        # BLS — tokenizer → ner_model → decode
+└── pipeline/            # Ensemble — declarative zincirleme
 ```
 
 ### Nasil calisir

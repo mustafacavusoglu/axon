@@ -1,9 +1,6 @@
-name: "nlp_ensemble"
+name: "pipeline"
 platform: "ensemble"
 max_batch_size: 1
-
-# ── Ensemble input/output ─────────────────────────────
-# Client sends raw text, ensemble runs tokenizer → NER → returns entities
 
 input {
   name: "raw_text"
@@ -13,18 +10,14 @@ input {
 
 output {
   name: "entities"
-  data_type: TYPE_STRING
-  dims: [1]
+  data_type: TYPE_FP32
+  dims: [1, -1, 7]
 }
 
-# ── Pipeline (declarative — no scripting needed) ────────
-# Step 1: Tokenizer → input_ids, attention_mask, token_type_ids
-# Step 2: NER Model → logits
-# (Step 3: decode logits → BLS script, not configurable)
 ensemble_scheduling {
   step [
     {
-      model_name: "tokenizer_model"
+      model_name: "tokenizer"
       model_version: -1
       input_map [
         { key: "text"  value: "raw_text" }

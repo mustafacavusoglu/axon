@@ -376,46 +376,42 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
   ]}'
 ```
 
-### Example 2: NLP NER Pipeline (BLS — tokenize + decode)
+### Example 2: NLP NER Pipeline (BLS — three-model chain)
 
-`nlp_model/ner_pipeline/1/model.rhai` — receives pre-tokenized input_ids, adds attention mask, calls BERT via BLS, decodes logits to entity labels:
+`nlp_model/` contains four models that demonstrate BLS and ensemble chaining:
+
+| Model | Type | Description |
+|-------|------|-------------|
+| `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids |
+| `ner_model` | ONNX | BERT-based NER (3 token inputs → logits) |
+| `ner_pipeline` | Script (BLS) | `infer("tokenizer")` → `infer("ner_model")` → decode entities |
+| `pipeline` | Ensemble | Declarative: tokenizer → ner_model (no scripting) |
+
+**ner_pipeline `model.rhai`** — calls tokenizer and ner_model via BLS, decodes logits:
 
 ```rhai
 fn execute(inputs) {
-    let ids = inputs.get("input_ids");
-    let n = ids.shape[1];
-
-    let mask_data = []; let type_data = []; let i = 0;
-    while i < n { mask_data.push(1); type_data.push(0); i += 1; }
+    let tokenized = infer("tokenizer", #{ "text": inputs.get("text") });
 
     let result = infer("ner_model", #{
-        "input_ids": ids,
-        "attention_mask": create_tensor_i64("mask", [1,n], mask_data),
-        "token_type_ids": create_tensor_i64("type", [1,n], type_data),
+        "input_ids": tokenized.get("input_ids"),
+        "attention_mask": tokenized.get("attention_mask"),
+        "token_type_ids": tokenized.get("token_type_ids"),
     });
 
     let logits = result.get("logits").as_f64();
     let labels = ["O","B-PER","I-PER","B-ORG","I-ORG","B-LOC","I-LOC"];
-
-    let output = "";
-    for pos in 1..n-1 {
-        let best = 0; let best_score = logits[pos*7];
-        for j in 1..7 { if logits[pos*7+j] > best_score { best = j; best_score = logits[pos*7+j]; } }
-        if labels[best] != "O" {
-            if output != "" { output += "; "; }
-            output += "token " + pos + " (id=" + ids.as_i64()[pos] + "): " + labels[best];
-        }
-    }
+    // ... decode logits to entity strings
     return #{ "entities": create_tensor_string("entities", [1], [output]) };
 }
 ```
 
 ```bash
-# Pre-tokenized IDs from HuggingFace tokenizer
+# Plain text input — tokenizer handles vocab lookup inline
 curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
   -H 'Content-Type: application/json' \
-  -d '{"inputs":[{"name":"input_ids","shape":[1,13],"datatype":"INT64","data":[2,3222,11,2054,4611,4542,16,2673,11,69,6128,18,3]}]}'
-# Output: "token 1 (id=3222): B-LOC; token 5 (id=4542): B-PER; token 7 (id=2673): B-LOC"
+  -d '{"inputs":[{"name":"text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
+# Output: "token 1 (id=7255): B-PER; token 4 (id=7700): B-LOC"
 ```
 
 ---
@@ -429,20 +425,20 @@ Each step maps tensors between models: step outputs flow into later step inputs 
 
 ### Example: NLP Pipeline (tokenizer → NER)
 
-`nlp_model/nlp_ensemble/config.pbtxt` — 2-step ensemble that chains tokenizer output into NER model:
+`nlp_model/pipeline/config.pbtxt` — 2-step ensemble that chains `tokenizer` → `ner_model` (both real models in the repo):
 
 ```protobuf
-name: "nlp_ensemble"
+name: "pipeline"
 platform: "ensemble"
 max_batch_size: 1
 
 input  { name: "raw_text"  data_type: TYPE_STRING  dims: [1] }
-output { name: "entities"  data_type: TYPE_STRING  dims: [1] }
+output { name: "entities"  data_type: TYPE_FP32     dims: [1, -1, 7] }
 
 ensemble_scheduling {
   step [
     {   # Step 1: Text → token IDs + attention mask
-      model_name: "tokenizer_model"
+      model_name: "tokenizer"
       model_version: -1
       input_map  [ { key: "text"  value: "raw_text" } ]
       output_map [
@@ -469,15 +465,12 @@ instance_group { count: 1  kind: KIND_CPU }
 
 YAML is cleaner:
 ```yaml
-name: nlp_ensemble
+name: pipeline
 platform: ensemble
-
-inputs: [{ name: raw_text, data_type: TYPE_STRING, dims: [1] }]
-outputs: [{ name: entities, data_type: TYPE_STRING, dims: [1] }]
 
 ensemble_scheduling:
   steps:
-    - model_name: tokenizer_model
+    - model_name: tokenizer
       input_map: [{ key: text, value: raw_text }]
       output_map:
         - { key: input_ids, value: ids }
@@ -489,11 +482,45 @@ ensemble_scheduling:
       output_map: [{ key: logits, value: entities }]
 ```
 
-### Ensemble model layout
+### Ensemble vs BLS comparison
+
+| | BLS (ner_pipeline) | Ensemble (pipeline) |
+|---|---|---|
+| How | `infer()` calls in Rhai script | Declarative config.pbtxt |
+| Tokenizer | Calls tokenizer model via BLS | Step 1 runs tokenizer model |
+| NER | Calls ner_model via BLS | Step 2 runs ner_model |
+| Decode | Rhai logic (logits → strings) | N/A (raw logits output) |
+| Scripting required | Yes | **No** |
+
+```bash
+# BLS pipeline (full text → entities)
+curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[{"name":"text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
+
+# Ensemble pipeline (text → raw logits, no decode script)
+curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[{"name":"raw_text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
 ```
-nlp_ensemble/
-├── config.yaml            # or config.pbtxt
-├── 1/                     # version dir (empty — no model file needed)
+
+### Directory layout
+
+```
+nlp_model/
+├── tokenizer/
+│   ├── config.yaml           # platform: "script"
+│   ├── 1/model.rhai          # text → token IDs
+│   └── 1/vocab.txt
+├── ner_model/
+│   ├── config.yaml           # platform: "onnxruntime_onnx"
+│   └── 1/model.onnx
+├── ner_pipeline/             # BLS: tokenizer → ner_model → decode
+│   ├── config.yaml
+│   └── 1/model.rhai
+└── pipeline/                 # Ensemble: tokenizer → ner_model (declarative)
+    ├── config.yaml
+    └── 1/                    # version dir (empty)
 ```
 
 ### How it works
@@ -505,6 +532,8 @@ nlp_ensemble/
 
 ### Available formats
 The config parser supports both block and list format:
+- `step { ... }` / `step [ { ... } { ... } ]`
+- `input_map { key: "x" value: "y" }` / `input_map [ { key: "x" value: "y" } ]`
 - `step { ... }` / `step [ { ... } { ... } ]`
 - `input_map { key: "x" value: "y" }` / `input_map [ { key: "x" value: "y" } ]`
 
