@@ -2,46 +2,48 @@ name: "xgb_housing"
 platform: "onnxruntime_onnx"
 max_batch_size: 8
 
-input {
-  name: "median_income"
-  data_type: TYPE_FP32
-  dims: [1]
-}
-input {
-  name: "house_age"
-  data_type: TYPE_FP32
-  dims: [1]
-}
-input {
-  name: "avg_rooms"
-  data_type: TYPE_FP32
-  dims: [1]
-}
-input {
-  name: "avg_bedrooms"
-  data_type: TYPE_FP32
-  dims: [1]
-}
-input {
-  name: "population"
-  data_type: TYPE_FP32
-  dims: [1]
-}
-input {
-  name: "avg_occupancy"
-  data_type: TYPE_FP32
-  dims: [1]
-}
-input {
-  name: "latitude"
-  data_type: TYPE_FP32
-  dims: [1]
-}
-input {
-  name: "longitude"
-  data_type: TYPE_FP32
-  dims: [1]
-}
+input [
+  {
+    name: "median_income"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+  {
+    name: "house_age"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+  {
+    name: "avg_rooms"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+  {
+    name: "avg_bedrooms"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+  {
+    name: "population"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+  {
+    name: "avg_occupancy"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+  {
+    name: "latitude"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+  {
+    name: "longitude"
+    data_type: TYPE_FP32
+    dims: [1]
+  }
+]
 
 output {
   name: "variable"

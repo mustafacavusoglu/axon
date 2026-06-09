@@ -88,6 +88,7 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
 
     let mut current_section = "";
     let mut brace_depth: i32 = 0;
+    let mut in_list = false;
 
     for raw_line in text.lines() {
         let line = raw_line.trim();
@@ -101,7 +102,7 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
         }
         if line == "}" {
             brace_depth -= 1;
-            if brace_depth == 0 && !current_section.is_empty() {
+            if brace_depth == 0 && !current_section.is_empty() && !in_list {
                 current_section = "";
             }
             continue;
@@ -110,6 +111,10 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
         let line = line.trim_end_matches('{').trim();
 
         if line == "]" {
+            if in_list {
+                current_section = "";
+                in_list = false;
+            }
             continue;
         }
 
@@ -128,6 +133,7 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
             {
                 current_section = prefix;
                 brace_depth = 0;
+                in_list = line.ends_with('[');
                 section_start = true;
                 break;
             }
@@ -294,5 +300,72 @@ instance_group {
     fn test_missing_name_errors() {
         let content = b"platform: \"onnxruntime_onnx\"\n";
         assert!(parse_model_config(content).is_err());
+    }
+
+    #[test]
+    fn test_parse_list_format() {
+        let content = br#"
+name: "list_model"
+platform: "onnxruntime_onnx"
+max_batch_size: 8
+
+input [
+  {
+    name: "input_0"
+    data_type: TYPE_FP32
+    dims: [1, 30]
+  }
+  {
+    name: "input_1"
+    data_type: TYPE_INT64
+    dims: [1, -1]
+  }
+  {
+    name: "input_2"
+    data_type: TYPE_STRING
+    dims: [1]
+  }
+]
+
+output [
+  {
+    name: "output_0"
+    data_type: TYPE_FP32
+    dims: [1, 2]
+  }
+  {
+    name: "output_1"
+    data_type: TYPE_INT64
+    dims: [1]
+  }
+]
+
+instance_group {
+  count: 2
+  kind: KIND_CPU
+}
+"#;
+        let cfg = parse_model_config(content).unwrap();
+        assert_eq!(cfg.name, "list_model");
+        assert_eq!(cfg.max_batch_size, 8);
+        assert_eq!(cfg.inputs.len(), 3);
+        assert_eq!(cfg.inputs[0].name, "input_0");
+        assert_eq!(cfg.inputs[0].data_type, DataType::Fp32);
+        assert_eq!(cfg.inputs[0].dims, vec![1, 30]);
+        assert_eq!(cfg.inputs[1].name, "input_1");
+        assert_eq!(cfg.inputs[1].data_type, DataType::Int64);
+        assert_eq!(cfg.inputs[1].dims, vec![1, -1]);
+        assert_eq!(cfg.inputs[2].name, "input_2");
+        assert_eq!(cfg.inputs[2].data_type, DataType::String);
+        assert_eq!(cfg.inputs[2].dims, vec![1]);
+        assert_eq!(cfg.outputs.len(), 2);
+        assert_eq!(cfg.outputs[0].name, "output_0");
+        assert_eq!(cfg.outputs[0].data_type, DataType::Fp32);
+        assert_eq!(cfg.outputs[0].dims, vec![1, 2]);
+        assert_eq!(cfg.outputs[1].name, "output_1");
+        assert_eq!(cfg.outputs[1].data_type, DataType::Int64);
+        assert_eq!(cfg.outputs[1].dims, vec![1]);
+        assert_eq!(cfg.instance_groups.len(), 1);
+        assert_eq!(cfg.instance_groups[0].count, 2);
     }
 }
