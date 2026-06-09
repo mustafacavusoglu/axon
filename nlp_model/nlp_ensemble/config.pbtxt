@@ -1,0 +1,56 @@
+name: "nlp_ensemble"
+platform: "ensemble"
+max_batch_size: 1
+
+# ── Ensemble input/output ─────────────────────────────
+# Client sends raw text, ensemble runs tokenizer → NER → returns entities
+
+input {
+  name: "raw_text"
+  data_type: TYPE_STRING
+  dims: [1]
+}
+
+output {
+  name: "entities"
+  data_type: TYPE_STRING
+  dims: [1]
+}
+
+# ── Pipeline (declarative — no scripting needed) ────────
+# Step 1: Tokenizer → input_ids, attention_mask, token_type_ids
+# Step 2: NER Model → logits
+# (Step 3: decode logits → BLS script, not configurable)
+ensemble_scheduling {
+  step [
+    {
+      model_name: "tokenizer_model"
+      model_version: -1
+      input_map [
+        { key: "text"  value: "raw_text" }
+      ]
+      output_map [
+        { key: "input_ids"       value: "ids" }
+        { key: "attention_mask"  value: "mask" }
+        { key: "token_type_ids"  value: "types" }
+      ]
+    }
+    {
+      model_name: "ner_model"
+      model_version: -1
+      input_map [
+        { key: "input_ids"       value: "ids" }
+        { key: "attention_mask"  value: "mask" }
+        { key: "token_type_ids"  value: "types" }
+      ]
+      output_map [
+        { key: "logits"  value: "entities" }
+      ]
+    }
+  ]
+}
+
+instance_group {
+  count: 1
+  kind: KIND_CPU
+}

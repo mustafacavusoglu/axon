@@ -7,6 +7,8 @@ Single-binary, Triton-compatible, CPU-first model serving.
 **Transport:** gRPC + HTTP/REST (KServe v2)  
 **Runtime:** ONNX Runtime  
 **BLS/Scripting:** Rhai (Python-like, Rust-native scripting language)  
+**Config:** YAML (`config.yaml`) or Triton-format (`config.pbtxt`)  
+**Ensemble:** Declarative model chaining via config (no scripting needed)  
 **Target:** Kubernetes / Docker / Bare-metal
 
 ---
@@ -47,16 +49,22 @@ cargo build --release
 # ONNX model layout:
 # models/
 # ├── model-name/
-# │   ├── config.pbtxt
+# │   ├── config.yaml        # or config.pbtxt
 # │   ├── 1/
 # │   │   └── model.onnx
 
-# Script model layout:
+# Script model layout (BLS):
 # models/
 # ├── pipeline/
-# │   ├── config.pbtxt     # platform: "script"
+# │   ├── config.yaml        # platform: "script"
 # │   ├── 1/
 # │   │   └── model.rhai
+
+# Ensemble model layout (declarative, no scripting):
+# models/
+# ├── ensemble-name/
+# │   ├── config.yaml        # platform: "ensemble"
+# │   ├── 1/                 # version dir (no model file)
 ```
 
 ### 4. Start server
@@ -224,7 +232,34 @@ Triton-compatible layout:
         └── model.onnx
 ```
 
-### config.pbtxt
+### Config Format — YAML & pbtxt
+
+Axon supports two config formats. **YAML is recommended** for readability; **pbtxt** is kept for Triton compatibility.
+
+When both `config.yaml` and `config.pbtxt` exist, **YAML takes priority**.
+
+#### YAML (recommended)
+```yaml
+name: my-model
+platform: onnxruntime_onnx
+max_batch_size: 8
+
+inputs:
+  - name: features
+    data_type: TYPE_FP32
+    dims: [30]
+
+outputs:
+  - name: probabilities
+    data_type: TYPE_FP32
+    dims: [2]
+
+instance_groups:
+  - count: 4
+    kind: KIND_CPU
+```
+
+#### pbtxt (Triton-compatible fallback)
 ```
 name: "my-model"
 platform: "onnxruntime_onnx"
@@ -386,6 +421,96 @@ curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
 
 ---
 
+## Ensemble Pipelines
+
+Declarative model chaining via `config.pbtxt` / `config.yaml` — **no scripting required**.  
+Use `platform: "ensemble"` and define `ensemble_scheduling` steps with `input_map` / `output_map`.
+
+Each step maps tensors between models: step outputs flow into later step inputs via the ensemble tensor pool.
+
+### Example: NLP Pipeline (tokenizer → NER)
+
+`nlp_model/nlp_ensemble/config.pbtxt` — 2-step ensemble that chains tokenizer output into NER model:
+
+```protobuf
+name: "nlp_ensemble"
+platform: "ensemble"
+max_batch_size: 1
+
+input  { name: "raw_text"  data_type: TYPE_STRING  dims: [1] }
+output { name: "entities"  data_type: TYPE_STRING  dims: [1] }
+
+ensemble_scheduling {
+  step [
+    {   # Step 1: Text → token IDs + attention mask
+      model_name: "tokenizer_model"
+      model_version: -1
+      input_map  [ { key: "text"  value: "raw_text" } ]
+      output_map [
+        { key: "input_ids"       value: "ids" }
+        { key: "attention_mask"  value: "mask" }
+        { key: "token_type_ids"  value: "types" }
+      ]
+    }
+    {   # Step 2: Token IDs → NER logits
+      model_name: "ner_model"
+      model_version: -1
+      input_map [
+        { key: "input_ids"       value: "ids" }
+        { key: "attention_mask"  value: "mask" }
+        { key: "token_type_ids"  value: "types" }
+      ]
+      output_map [ { key: "logits"  value: "entities" } ]
+    }
+  ]
+}
+
+instance_group { count: 1  kind: KIND_CPU }
+```
+
+YAML is cleaner:
+```yaml
+name: nlp_ensemble
+platform: ensemble
+
+inputs: [{ name: raw_text, data_type: TYPE_STRING, dims: [1] }]
+outputs: [{ name: entities, data_type: TYPE_STRING, dims: [1] }]
+
+ensemble_scheduling:
+  steps:
+    - model_name: tokenizer_model
+      input_map: [{ key: text, value: raw_text }]
+      output_map:
+        - { key: input_ids, value: ids }
+        - { key: attention_mask, value: mask }
+    - model_name: ner_model
+      input_map:
+        - { key: input_ids, value: ids }
+        - { key: attention_mask, value: mask }
+      output_map: [{ key: logits, value: entities }]
+```
+
+### Ensemble model layout
+```
+nlp_ensemble/
+├── config.yaml            # or config.pbtxt
+├── 1/                     # version dir (empty — no model file needed)
+```
+
+### How it works
+1. **Top-level inputs/outputs** define the ensemble's external API
+2. **`input_map`**: maps ensemble tensor → step input (`key` = step input name, `value` = ensemble tensor name)
+3. **`output_map`**: maps step output → ensemble tensor (`key` = step output name, `value` = ensemble tensor name)
+4. Steps run sequentially; each step's outputs become available for later steps' inputs
+5. `model_version: -1` always uses the latest version of the model
+
+### Available formats
+The config parser supports both block and list format:
+- `step { ... }` / `step [ { ... } { ... } ]`
+- `input_map { key: "x" value: "y" }` / `input_map [ { key: "x" value: "y" } ]`
+
+---
+
 ## Metrics
 
 Prometheus metrics at `:8002/metrics`:
@@ -441,7 +566,8 @@ ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib \
 ## Upcoming Features
 
 - ~~BLS / Scripting~~ — Preprocess/postprocess/BLS via Rhai scripting engine ✅
-- Ensemble pipelines — chain models via config.pbtxt (A output -> B input)
+- ~~Ensemble pipelines~~ — Declarative model chaining via config (pbtxt + YAML, no scripting) ✅
+- ~~YAML config~~ — config.yaml support alongside config.pbtxt (serde_yaml) ✅
 - Dynamic batching — accumulate requests into batches per model
 - OpenVINO backend — Intel CPU optimization
 - Model warmup — pre-warm ONNX sessions on load

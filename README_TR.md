@@ -7,6 +7,8 @@ Tek binary, Triton uyumlu, CPU oncelikli model sunum sistemi.
 **Iletisim:** gRPC + HTTP/REST (KServe v2)  
 **Runtime:** ONNX Runtime  
 **BLS/Scripting:** Rhai (Python benzeri Rust-native script dili)  
+**Config:** YAML (`config.yaml`) veya Triton formatı (`config.pbtxt`)  
+**Ensemble:** Declarative model zincirleme (script gerektirmez)  
 **Hedef:** Kubernetes / Docker / Bare-metal
 
 ---
@@ -47,16 +49,22 @@ cargo build --release
 # ONNX modeli icin dizin yapisi:
 # models/
 # ├── model-adi/
-# │   ├── config.pbtxt
+# │   ├── config.yaml        # veya config.pbtxt
 # │   ├── 1/
 # │   │   └── model.onnx
 
-# Script modeli icin:
+# Script modeli icin (BLS):
 # models/
 # ├── pipeline/
-# │   ├── config.pbtxt     # platform: "script"
+# │   ├── config.yaml        # platform: "script"
 # │   ├── 1/
 # │   │   └── model.rhai
+
+# Ensemble modeli icin (declarative, script gerektirmez):
+# models/
+# ├── ensemble-adi/
+# │   ├── config.yaml        # platform: "ensemble"
+# │   ├── 1/                 # versiyon dizini (dosya gerekmez)
 ```
 
 ### 4. Sunucuyu calistirma
@@ -224,7 +232,34 @@ Triton uyumlu dizin yapisi:
         └── model.onnx
 ```
 
-### config.pbtxt
+### Config Formati — YAML & pbtxt
+
+Axon iki config formatini destekler. **YAML** okunabilirlik acisindan onerilir; **pbtxt** Triton uyumlulugu icin korunur.
+
+Ayni dizinde hem `config.yaml` hem `config.pbtxt` varsa, **YAML onceliklidir**.
+
+#### YAML (onerilen)
+```yaml
+name: benim-modelim
+platform: onnxruntime_onnx
+max_batch_size: 8
+
+inputs:
+  - name: features
+    data_type: TYPE_FP32
+    dims: [30]
+
+outputs:
+  - name: probabilities
+    data_type: TYPE_FP32
+    dims: [2]
+
+instance_groups:
+  - count: 4
+    kind: KIND_CPU
+```
+
+#### pbtxt (Triton uyumlu fallback)
 ```
 name: "benim-modelim"
 platform: "onnxruntime_onnx"
@@ -258,7 +293,7 @@ Inference engine'e model-ozel hicbir fonksiyon eklenmez — tum is mantigi `mode
 ```
 models/
 ├── pipeline/
-│   ├── config.pbtxt      # platform: "script"
+│   ├── config.yaml         # veya config.pbtxt — platform: "script"
 │   ├── 1/
 │   │   └── model.rhai    # Script dosyasi
 ```
@@ -386,6 +421,73 @@ curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
 
 ---
 
+## Ensemble Pipeline
+
+Declarative model zincirleme — `config.pbtxt` / `config.yaml` ile, **hic script yazmadan**.  
+`platform: "ensemble"` kullanip, `ensemble_scheduling` adimlarini `input_map` / `output_map` ile tanimlarsiniz.
+
+Her adim, tensor'lari modeller arasi aktarir: bir step'in ciktisi sonraki step'in girdisine map'lenir.
+
+### Ornek: NLP Pipeline (tokenizer → NER)
+
+`nlp_model/nlp_ensemble/config.pbtxt` — tokenizer ciktisini NER modeline zincirleyen 2 adimli ensemble:
+
+```protobuf
+name: "nlp_ensemble"
+platform: "ensemble"
+max_batch_size: 1
+
+input  { name: "raw_text"  data_type: TYPE_STRING  dims: [1] }
+output { name: "entities"  data_type: TYPE_STRING  dims: [1] }
+
+ensemble_scheduling {
+  step [
+    {   # Adim 1: Text → token ID'leri + attention mask
+      model_name: "tokenizer_model"
+      model_version: -1
+      input_map  [ { key: "text"  value: "raw_text" } ]
+      output_map [
+        { key: "input_ids"       value: "ids" }
+        { key: "attention_mask"  value: "mask" }
+        { key: "token_type_ids"  value: "types" }
+      ]
+    }
+    {   # Adim 2: Token ID'leri → NER logits
+      model_name: "ner_model"
+      model_version: -1
+      input_map [
+        { key: "input_ids"       value: "ids" }
+        { key: "attention_mask"  value: "mask" }
+        { key: "token_type_ids"  value: "types" }
+      ]
+      output_map [ { key: "logits"  value: "entities" } ]
+    }
+  ]
+}
+
+instance_group { count: 1  kind: KIND_CPU }
+```
+
+YAML daha okunabilir:
+```yaml
+ensemble_scheduling:
+  steps:
+    - model_name: tokenizer_model
+      input_map: [{ key: text, value: raw_text }]
+      output_map:
+        - { key: input_ids, value: ids }
+        - { key: attention_mask, value: mask }
+```
+
+### Nasil calisir
+1. **En ustteki inputs/outputs** ensemble'in disariya actigi API'yi tanimlar
+2. **`input_map`**: ensemble tensor → step girdisi (`key` = step'in bekledigi isim, `value` = ensemble havuzundaki tensor)
+3. **`output_map`**: step ciktisi → ensemble tensor (`key` = step'in urettigi isim, `value` = ensemble havuzuna yazilacak isim)
+4. Adimlar sirayla calisir; her adimin ciktisi sonraki adimlarin girdisine map'lenebilir
+5. `model_version: -1` her zaman modelin en son versiyonunu kullanir
+
+---
+
 ## Metrikler
 
 Prometheus metrikleri `:8002/metrics` uzerinde:
@@ -441,7 +543,8 @@ ORT_DYLIB_PATH=/opt/homebrew/lib/libonnxruntime.dylib \
 ## Siradaki Ozellikler
 
 - ~~BLS / Scripting~~ — Preprocess/postprocess/BLS Rhai scripting engine ✅
-- Ensemble pipelines — modelleri zincirleme (A ciktisi -> B girdisi, config.pbtxt tabanli)
+- ~~Ensemble pipelines~~ — Declarative model zincirleme (pbtxt + YAML, script gerektirmez) ✅
+- ~~YAML config~~ — config.yaml destegi (config.pbtxt ile birlikte, serde_yaml) ✅
 - Dynamic batching — modele ozel istekleri biriktirip toplu isleme
 - OpenVINO backend — Intel CPU optimizasyonu
 - Model warmup — ilk yuklemede ONNX oturumlarini isitma
