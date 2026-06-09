@@ -12,6 +12,7 @@ use super::types::{InferenceOutput, InputTensor, TensorData};
 pub struct OnnxRunner {
     sessions: Vec<Mutex<Session>>,
     semaphore: Arc<Semaphore>,
+    #[allow(dead_code)]
     model_path: PathBuf,
 }
 
@@ -36,13 +37,13 @@ impl OnnxRunner {
 
     fn create_session(model_path: &Path) -> anyhow::Result<Session> {
         let builder = Session::builder()
-            .map_err(|e| anyhow::anyhow!("failed to create session builder: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?;
 
         builder
             .with_optimization_level(GraphOptimizationLevel::Level3)
-            .map_err(|e| anyhow::anyhow!("failed to set optimization level: {}", e))?
+            .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
             .with_intra_threads(1)
-            .map_err(|e| anyhow::anyhow!("failed to set intra threads: {}", e))?
+            .map_err(|e| anyhow::anyhow!("failed to set intra threads: {e}"))?
             .commit_from_file(model_path)
             .map_err(|e| {
                 anyhow::anyhow!("failed to load ONNX model {}: {}", model_path.display(), e)
@@ -62,28 +63,28 @@ impl OnnxRunner {
                     let array =
                         ndarray::ArrayD::<f32>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
                     Value::from_array(array)
-                        .map_err(|e| anyhow::anyhow!("fp32 input '{}': {}", name, e))?
+                        .map_err(|e| anyhow::anyhow!("fp32 input '{name}': {e}"))?
                         .into()
                 }
                 InputTensor::I32(data, shape) => {
                     let array =
                         ndarray::ArrayD::<i32>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
                     Value::from_array(array)
-                        .map_err(|e| anyhow::anyhow!("int32 input '{}': {}", name, e))?
+                        .map_err(|e| anyhow::anyhow!("int32 input '{name}': {e}"))?
                         .into()
                 }
                 InputTensor::I64(data, shape) => {
                     let array =
                         ndarray::ArrayD::<i64>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
                     Value::from_array(array)
-                        .map_err(|e| anyhow::anyhow!("int64 input '{}': {}", name, e))?
+                        .map_err(|e| anyhow::anyhow!("int64 input '{name}': {e}"))?
                         .into()
                 }
                 InputTensor::String(data, shape) => {
                     let array =
                         ndarray::ArrayD::<String>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
                     let string_tensor: Value = Tensor::from_string_array(&array)
-                        .map_err(|e| anyhow::anyhow!("string input '{}': {}", name, e))?
+                        .map_err(|e| anyhow::anyhow!("string input '{name}': {e}"))?
                         .into();
                     string_tensor
                 }
@@ -102,7 +103,7 @@ impl OnnxRunner {
 
         let outputs = session
             .run(session_inputs)
-            .map_err(|e| anyhow::anyhow!("inference failed: {}", e))?;
+            .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
 
         let mut results = Vec::new();
         for (name, value) in outputs.iter() {
@@ -119,15 +120,15 @@ fn extract_output(
     value: &ort::value::ValueRef<'_>,
 ) -> anyhow::Result<(Vec<i64>, TensorData)> {
     if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
-        let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+        let shape_i64: Vec<i64> = shape.iter().copied().collect();
         return Ok((shape_i64, TensorData::F32(data.to_vec())));
     }
     if let Ok((shape, data)) = value.try_extract_tensor::<i64>() {
-        let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+        let shape_i64: Vec<i64> = shape.iter().copied().collect();
         return Ok((shape_i64, TensorData::I64(data.to_vec())));
     }
     if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
-        let shape_i64: Vec<i64> = shape.iter().map(|&d| d as i64).collect();
+        let shape_i64: Vec<i64> = shape.iter().copied().collect();
         return Ok((shape_i64, TensorData::I32(data.to_vec())));
     }
 
@@ -138,8 +139,7 @@ fn extract_output(
     }
 
     Err(anyhow::anyhow!(
-        "unsupported output tensor type for '{}'",
-        name
+        "unsupported output tensor type for '{name}'"
     ))
 }
 
@@ -148,13 +148,13 @@ fn extract_tree_sequence(
     maps: &[ort::value::ValueRef<'_, ort::value::DynValueTypeMarker>],
 ) -> anyhow::Result<(Vec<i64>, TensorData)> {
     if maps.is_empty() {
-        return Err(anyhow::anyhow!("empty sequence output for '{}'", name));
+        return Err(anyhow::anyhow!("empty sequence output for '{name}'"));
     }
 
     let first_map = &maps[0];
     let probs: HashMap<i64, f32> = first_map
         .try_extract_map::<i64, f32>()
-        .map_err(|e| anyhow::anyhow!("failed to extract map from '{}': {}", name, e))?;
+        .map_err(|e| anyhow::anyhow!("failed to extract map from '{name}': {e}"))?;
 
     let num_classes = probs.len();
     let max_key = probs.keys().max().copied().unwrap_or(0);
@@ -166,7 +166,7 @@ fn extract_tree_sequence(
     for map_val in maps {
         let class_map: HashMap<i64, f32> = map_val
             .try_extract_map::<i64, f32>()
-            .map_err(|e| anyhow::anyhow!("failed to extract map element from '{}': {}", name, e))?;
+            .map_err(|e| anyhow::anyhow!("failed to extract map element from '{name}': {e}"))?;
 
         let mut row = vec![0.0f32; class_dim];
         for (k, v) in class_map {

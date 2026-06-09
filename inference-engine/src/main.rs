@@ -35,7 +35,7 @@ fn init_tracing() -> Option<SdkTracerProvider> {
         .build();
 
     let tracer = provider.tracer("axon-server");
-    let _ = opentelemetry::global::set_tracer_provider(provider.clone());
+    opentelemetry::global::set_tracer_provider(provider.clone());
 
     let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
 
@@ -70,7 +70,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     // Tokio handles async IO only — needs far fewer threads than inference
-    let tokio_threads = (inference_threads / 2).max(2).min(8);
+    let tokio_threads = (inference_threads / 2).clamp(2, 8);
 
     let pool = SessionPool::new(inference_threads)?;
 

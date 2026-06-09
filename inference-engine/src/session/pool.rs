@@ -27,7 +27,7 @@ impl ModelSession {
 }
 
 fn model_key(name: &str, version: u32) -> String {
-    format!("{}@v{}", name, version)
+    format!("{name}@v{version}")
 }
 
 #[derive(Clone)]
@@ -39,7 +39,7 @@ impl SessionPool {
     pub fn new(num_threads: usize) -> anyhow::Result<Self> {
         rayon::ThreadPoolBuilder::new()
             .num_threads(num_threads)
-            .thread_name(|i| format!("infer-worker-{}", i))
+            .thread_name(|i| format!("infer-worker-{i}"))
             .build_global()
             .context("failed to build rayon thread pool")?;
 
@@ -170,7 +170,7 @@ impl SessionPool {
                 tracing::info!(name, version, "model unloaded");
                 Ok(())
             }
-            None => anyhow::bail!("model not found: {}", key),
+            None => anyhow::bail!("model not found: {key}"),
         }
     }
 
@@ -183,11 +183,10 @@ impl SessionPool {
         let mut latest: Option<Arc<ModelSession>> = None;
         for entry in self.sessions.iter() {
             let s = entry.value();
-            if s.name == name && s.state == SessionState::Ready {
-                if latest.as_ref().map_or(true, |l| s.version > l.version) {
+            if s.name == name && s.state == SessionState::Ready
+                && latest.as_ref().is_none_or(|l| s.version > l.version) {
                     latest = Some(s.clone());
                 }
-            }
         }
         latest
     }

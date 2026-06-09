@@ -16,6 +16,7 @@ pub enum TensorData {
     String(Vec<String>),
 }
 
+#[allow(dead_code)]
 impl TensorData {
     pub fn to_bytes(&self) -> Vec<u8> {
         match self {
@@ -76,6 +77,7 @@ impl TensorData {
 
 pub type InferenceOutput = Vec<(String, Vec<i64>, TensorData)>;
 
+#[allow(dead_code)]
 impl InputTensor {
     pub fn name(&self) -> &str {
         ""
@@ -116,6 +118,7 @@ impl InputTensor {
     }
 }
 
+#[allow(dead_code)]
 pub fn input_tensors_to_map(
     inputs: Vec<(String, InputTensor)>,
 ) -> HashMap<String, InputTensor> {
@@ -126,6 +129,7 @@ pub fn input_tensors_to_map(
     map
 }
 
+#[allow(dead_code)]
 pub fn map_to_input_tensors(map: HashMap<String, InputTensor>) -> Vec<(String, InputTensor)> {
     map.into_iter().collect()
 }

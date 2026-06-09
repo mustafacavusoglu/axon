@@ -413,12 +413,7 @@ pub fn parse_model_config_yaml(content: &[u8]) -> Result<ModelConfig> {
 }
 
 fn strip_field<'a>(line: &'a str, prefix: &str) -> Option<&'a str> {
-    if line.starts_with(prefix) {
-        Some(line[prefix.len()..].trim())
-    } else {
-        None
-    }
-}
+    line.strip_prefix(prefix).map(|s| s.trim())
 
 fn unquote(s: &str) -> String {
     s.trim().trim_matches('"').to_string()

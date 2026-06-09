@@ -54,7 +54,7 @@ pub async fn serve(
         .route("/v2/repository/index", post(repository_index))
         .with_state(state);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .expect("failed to bind HTTP port");
 
@@ -109,7 +109,7 @@ async fn list_models(State(state): State<Arc<AppState>>) -> Json<Vec<ModelEntry>
         .map(|(name, version, st)| ModelEntry {
             name,
             version: version.to_string(),
-            state: format!("{:?}", st),
+            state: format!("{st:?}"),
         })
         .collect();
     Json(entries)
@@ -527,7 +527,7 @@ async fn repository_index(State(state): State<Arc<AppState>>) -> Json<Vec<RepoMo
 }
 
 fn load_config_for_model(
-    repo_path: &PathBuf,
+    repo_path: &Path,
     model_name: &str,
 ) -> Option<model_repository::ModelConfig> {
     let config_path = repo_path.join(model_name).join("config.pbtxt");

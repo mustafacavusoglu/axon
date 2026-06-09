@@ -103,7 +103,7 @@ impl RhaiRunner {
         let script_content = std::fs::read_to_string(script_path)
             .map_err(|e| anyhow::anyhow!("failed to read script {}: {}", script_path.display(), e))?;
 
-        let script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let _script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
         let mut engine = Engine::new();
 
@@ -226,9 +226,7 @@ impl RhaiRunner {
             let mut words: Vec<Dynamic> = Vec::new();
             let mut current = String::new();
             for ch in text.chars() {
-                if ch.is_whitespace() {
-                    if !current.is_empty() { words.push(current.clone().into()); current.clear(); }
-                } else if ch.is_ascii_punctuation() && ch != '-' && ch != '#' {
+                if ch.is_whitespace() || (ch.is_ascii_punctuation() && ch != '-' && ch != '#') {
                     if !current.is_empty() { words.push(current.clone().into()); current.clear(); }
                 } else {
                     current.push(ch);
@@ -251,10 +249,10 @@ impl RhaiRunner {
             }
 
             let session = bls_pool.get_latest(model_name)
-                .ok_or_else(|| format!("model '{}' not found or not ready", model_name))?;
+                .ok_or_else(|| format!("model '{model_name}' not found or not ready"))?;
 
             let outputs = session.runner.run(input_tensors)
-                .map_err(|e| format!("BLS inference failed for '{}': {}", model_name, e))?;
+                .map_err(|e| format!("BLS inference failed for '{model_name}': {e}"))?;
 
             let mut output_map = rhai::Map::new();
             for (name, shape, data) in outputs {
@@ -314,7 +312,7 @@ impl RhaiRunner {
                     "Rhai script '{}' returned non-Tensor value for output '{}'",
                     self.script_path.display(),
                     key
-                ).into());
+                ));
             };
             let (shape, data) = tensor.into_output();
             outputs.push((key.to_string(), shape, data));

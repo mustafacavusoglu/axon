@@ -4,7 +4,7 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::sync::Semaphore;
 
-use crate::model_repository::config_parser::{EnsembleScheduling, KeyValue, ModelConfig};
+use crate::model_repository::config_parser::{KeyValue, ModelConfig};
 use crate::session::pool::SessionPool;
 use crate::session::types::{InferenceOutput, InputTensor, TensorData};
 
@@ -72,7 +72,7 @@ impl EnsembleRunner {
             let session = self
                 .pool
                 .get_latest(model_name)
-                .with_context(|| format!("model '{}' not found in pool", model_name))?;
+                .with_context(|| format!("model '{model_name}' not found in pool"))?;
 
             let outputs = session.runner.run(step_inputs)?;
 
@@ -94,7 +94,7 @@ impl EnsembleRunner {
         for output_name in &self.outputs {
             let tensor = tensor_map
                 .get(output_name)
-                .with_context(|| format!("missing final output tensor '{}'", output_name))?;
+                .with_context(|| format!("missing final output tensor '{output_name}'"))?;
 
             let (shape, data) = match tensor {
                 InputTensor::F32(d, s) => {

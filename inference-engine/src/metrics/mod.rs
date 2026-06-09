@@ -146,6 +146,7 @@ pub fn record_request(model: &str, status: &str) {
     }
 }
 
+#[allow(dead_code)]
 pub fn inc_requests() {
     record_request("", "200");
 }
@@ -188,6 +189,7 @@ pub fn set_model_ready(model: &str, version: u32) {
     }
 }
 
+#[allow(dead_code)]
 pub fn clear_model(model: &str, version: u32) {
     if let Some(m) = MODEL_INFO.get() {
         m.with_label_values(&[model, &version.to_string()]).set(0);
@@ -231,7 +233,7 @@ async fn metrics_handler() -> String {
 pub async fn serve_metrics(port: u16, mut shutdown: watch::Receiver<bool>) {
     let app = Router::new().route("/metrics", get(metrics_handler));
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{}", port))
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
         .await
         .expect("failed to bind metrics port");
 

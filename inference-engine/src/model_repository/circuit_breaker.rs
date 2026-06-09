@@ -17,11 +17,10 @@ impl CircuitBreaker {
 
     pub fn is_open(&self, key: &str) -> bool {
         if let Some((count, last_fail)) = self.failures.get(key) {
-            if *count >= MAX_FAILURES {
-                if last_fail.elapsed() < RESET_TIMEOUT {
+            if *count >= MAX_FAILURES
+                && last_fail.elapsed() < RESET_TIMEOUT {
                     return true;
                 }
-            }
         }
         false
     }

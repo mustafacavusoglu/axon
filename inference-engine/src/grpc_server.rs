@@ -40,7 +40,7 @@ pub async fn serve(
         inference_timeout: std::time::Duration::from_millis(inference_timeout_ms),
     };
 
-    let addr = format!("0.0.0.0:{}", port).parse().unwrap();
+    let addr = format!("0.0.0.0:{port}").parse().unwrap();
 
     tracing::info!(port, "gRPC server listening");
 
@@ -181,10 +181,9 @@ impl GrpcInferenceService for KfsService {
         metrics::record_queue_wait(&req.model_name, queue_start.elapsed().as_secs_f64());
         metrics::inc_inflight(&req.model_name);
 
-        let inputs = parse_grpc_inputs(&req.inputs).map_err(|s| {
+        let inputs = parse_grpc_inputs(&req.inputs).inspect_err(|_s| {
             metrics::dec_inflight(&req.model_name);
             metrics::record_request(&req.model_name, "400");
-            s
         })?;
 
         let start = Instant::now();
@@ -196,12 +195,12 @@ impl GrpcInferenceService for KfsService {
             Ok(Ok(Err(e))) => {
                 metrics::dec_inflight(&req.model_name);
                 metrics::record_request(&req.model_name, "500");
-                return Err(Status::internal(format!("inference error: {}", e)));
+                return Err(Status::internal(format!("inference error: {e}")));
             }
             Ok(Err(e)) => {
                 metrics::dec_inflight(&req.model_name);
                 metrics::record_request(&req.model_name, "500");
-                return Err(Status::internal(format!("task join error: {}", e)));
+                return Err(Status::internal(format!("task join error: {e}")));
             }
             Err(_) => {
                 metrics::dec_inflight(&req.model_name);
@@ -241,6 +240,7 @@ impl GrpcInferenceService for KfsService {
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn parse_grpc_inputs(inputs: &[InferInput]) -> Result<Vec<(String, InputTensor)>, Status> {
     let mut result = Vec::with_capacity(inputs.len());
 

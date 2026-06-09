@@ -79,7 +79,7 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
         }
 
         for version in versions {
-            let cb_key = format!("{}@v{}", model_name, version);
+            let cb_key = format!("{model_name}@v{version}");
 
             if let Ok(cb) = get_circuit_breaker().lock() {
                 if cb.is_open(&cb_key) {
