@@ -335,49 +335,48 @@ Functions provided by the inference engine (tensor ops and BLS only):
 | `create_tensor_string(name, shape, data)` | Create string tensor |
 | `infer(model_name, inputs)` | BLS: call inference on another model |
 
-### Example 1: ML Preprocess (fill null and -1 with 0)
+### Example 1: ML Model (direct inference)
 
-`ml_model/preprocess_ml/1/model.rhai` — replaces -1 and negative values with 0 before inference:
+`ml_model/xgb_housing/` — simple XGBoost housing price predictor, 8 features → 1 output:
 
-```rhai
-fn clean(values) {
-    let cleaned = [];
-    for v in values {
-        if v < 0.0 { cleaned.push(0.0); }
-        else { cleaned.push(v); }
-    }
-    return cleaned;
-}
+```yaml
+# config.yaml
+name: xgb_housing
+platform: onnxruntime_onnx
+max_batch_size: 8
 
-fn execute(inputs) {
-    let names = ["median_income","house_age","avg_rooms","avg_bedrooms",
-                 "population","avg_occupancy","latitude","longitude"];
-    let cleaned = #{};
-    for name in names {
-        let t = inputs.get(name);
-        cleaned[name] = create_tensor_f64(name, t.shape, clean(t.as_f64()));
-    }
-    return infer("xgb_housing", cleaned);
-}
+inputs:
+  - name: median_income
+    data_type: TYPE_FP32
+    dims: [1]
+  # ... 7 more features
+
+outputs:
+  - name: variable
+    data_type: TYPE_FP32
+    dims: [1, 1]
+
+instance_groups:
+  - count: 2
+    kind: KIND_CPU
 ```
 
 ```bash
-# Data with -1 values (preprocess auto-fills with 0)
-curl -s -X POST http://localhost:8000/v2/models/preprocess_ml/infer \
+curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
   -H 'Content-Type: application/json' \
   -d '{"inputs":[
-    {"name":"median_income","shape":[1],"datatype":"FP32","data":[-1]},
-    {"name":"house_age","shape":[1],"datatype":"FP32","data":[20]},
-    {"name":"avg_rooms","shape":[1],"datatype":"FP32","data":[-1]},
-    {"name":"avg_bedrooms","shape":[1],"datatype":"FP32","data":[1]},
-    {"name":"population","shape":[1],"datatype":"FP32","data":[1200]},
-    {"name":"avg_occupancy","shape":[1],"datatype":"FP32","data":[-1]},
+    {"name":"median_income","shape":[1],"datatype":"FP32","data":[3.5]},
+    {"name":"house_age","shape":[1],"datatype":"FP32","data":[25]},
+    {"name":"avg_rooms","shape":[1],"datatype":"FP32","data":[6]},
+    {"name":"avg_bedrooms","shape":[1],"datatype":"FP32","data":[1.1]},
+    {"name":"population","shape":[1],"datatype":"FP32","data":[1500]},
+    {"name":"avg_occupancy","shape":[1],"datatype":"FP32","data":[3]},
     {"name":"latitude","shape":[1],"datatype":"FP32","data":[34]},
     {"name":"longitude","shape":[1],"datatype":"FP32","data":[-118]}
   ]}'
 ```
 
-### Example 2: NLP NER Pipeline (attention mask + decode)
+### Example 2: NLP NER Pipeline (BLS — tokenize + decode)
 
 `nlp_model/ner_pipeline/1/model.rhai` — receives pre-tokenized input_ids, adds attention mask, calls BERT via BLS, decodes logits to entity labels:
 
