@@ -26,6 +26,8 @@ ensemble_scheduling:
           value: mask
         - key: token_type_ids
           value: types
+        - key: words
+          value: words
 
     - model_name: ner_model
       model_version: -1
@@ -45,6 +47,8 @@ ensemble_scheduling:
       input_map:
         - key: logits
           value: ner_logits
+        - key: words
+          value: words
       output_map:
         - key: entities
           value: entities

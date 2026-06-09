@@ -40,9 +40,18 @@ fn execute(inputs) {
         j += 1;
     }
 
+    let word_str = "";
+    let k = 0;
+    while k < words.len() {
+        if k > 0 { word_str += "|"; }
+        word_str += words[k];
+        k += 1;
+    }
+
     return #{
         "input_ids": create_tensor_i64("input_ids", [1, n], input_ids),
         "attention_mask": create_tensor_i64("attention_mask", [1, n], attention_mask),
         "token_type_ids": create_tensor_i64("token_type_ids", [1, n], token_type_ids),
+        "words": create_tensor_string("words", [1], [word_str]),
     };
 }
