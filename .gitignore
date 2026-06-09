@@ -26,12 +26,8 @@ plan.md
 # nlp_model: sadece büyük model dosyalarını ignore et
 nlp_model/ner_model/*.onnx
 nlp_model/ner_model/*.onnx.data
-nlp_model/ner_model/1/
-nlp_model/ner_pipeline/1/*.onnx
-nlp_model/ner_pipeline/1/*.onnx.data
-nlp_model/ner_pipeline/1/tokenizer.json
-nlp_model/ner_pipeline/1/tokenizer_config.json
-nlp_model/ner_pipeline/1/vocab.txt
+nlp_model/tokenizer/1/vocab.txt
+nlp_model/decoder/1/
 
 # ml_model: sadece büyük model dosyalarını ignore et
 ml_model/xgb_housing/*.onnx

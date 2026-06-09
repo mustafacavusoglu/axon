@@ -376,27 +376,28 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
   ]}'
 ```
 
-### Ornek 2: NLP Pipeline (tokenizer → NER)
+### Ornek 2: NLP Pipeline (tokenizer → ner_model → decoder)
 
-`nlp_model/` altinda BLS ve ensemble zincirlemeyi gosteren uc model bulunur:
+`nlp_model/` altinda BLS ve ensemble zincirlemeyi gosteren dort model bulunur:
 
 | Model | Tip | Aciklama |
 |-------|-----|----------|
-| `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids |
+| `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids, words |
 | `ner_model` | ONNX | BERT tabanli NER (3 token girdisi → logits) |
-| `pipeline` | Ensemble | Declarative: tokenizer → ner_model (script gerektirmez) |
+| `decoder` | Script (BLS) | logits + words → entity etiketleri (B-PER, B-LOC…) |
+| `pipeline` | Ensemble | Declarative 3 adim: tokenizer → ner_model → decoder |
 
-**Tokenizer `model.rhai`** — vocab okur, duzyaziyi BERT tensor'lerine cevirir:
+**Tokenizer `model.rhai`** — vocab okur, duzyaziyi tokenize eder, decoder icin kelimeleri saklar:
 
 ```rhai
 fn execute(inputs) {
-    let text_tensor = inputs.get("text");
-    let text = text_tensor.as_string();
+    let text = inputs.get("text").as_string();
     // ... vocab map, split_words, token ID'lerine donusturme
     return #{
         "input_ids": create_tensor_i64("input_ids", [1, n], input_ids),
         "attention_mask": create_tensor_i64("attention_mask", [1, n], attention_mask),
         "token_type_ids": create_tensor_i64("token_type_ids", [1, n], token_type_ids),
+        "words": create_tensor_string("words", [1], [word_str]),
     };
 }
 ```
@@ -424,9 +425,11 @@ curl -s -X POST http://localhost:8000/v2/models/ner_model/infer \
 Declarative model zincirleme — `config.pbtxt` / `config.yaml` ile, **hic script yazmadan**.  
 `platform: "ensemble"` kullanip, `ensemble_scheduling` adimlarini `input_map` / `output_map` ile tanimlarsiniz.
 
-### Ornek: NLP Pipeline (tokenizer → NER)
+Ara tensor'lar (`ner_logits` gibi) adimlar arasinda seffaf sekilde aktarilir.
 
-`nlp_model/pipeline/config.pbtxt` — `tokenizer` ve `ner_model`'i (repo'da gercekten var olan modeller) zincirler:
+### Ornek: NLP Pipeline (3 adimli ensemble)
+
+`nlp_model/pipeline/config.pbtxt` — `tokenizer` → `ner_model` → `decoder` zinciri:
 
 ```protobuf
 name: "pipeline"
@@ -434,11 +437,11 @@ platform: "ensemble"
 max_batch_size: 1
 
 input  { name: "raw_text"  data_type: TYPE_STRING  dims: [1] }
-output { name: "entities"  data_type: TYPE_FP32     dims: [1, -1, 7] }
+output { name: "entities"  data_type: TYPE_STRING  dims: [1] }
 
 ensemble_scheduling {
   step [
-    {   # Adim 1: Text → token ID'leri + attention mask
+    {   # Adim 1: Text → token ID'leri + kelimeler
       model_name: "tokenizer"
       model_version: -1
       input_map  [ { key: "text"  value: "raw_text" } ]
@@ -446,6 +449,7 @@ ensemble_scheduling {
         { key: "input_ids"       value: "ids" }
         { key: "attention_mask"  value: "mask" }
         { key: "token_type_ids"  value: "types" }
+        { key: "words"           value: "words" }
       ]
     }
     {   # Adim 2: Token ID'leri → NER logits
@@ -456,10 +460,56 @@ ensemble_scheduling {
         { key: "attention_mask"  value: "mask" }
         { key: "token_type_ids"  value: "types" }
       ]
-      output_map [ { key: "logits"  value: "entities" } ]
+      output_map [ { key: "logits"  value: "ner_logits" } ]
+    }
+    {   # Adim 3: logits + kelimeler → entity etiketleri
+      model_name: "decoder"
+      model_version: -1
+      input_map [
+        { key: "logits"  value: "ner_logits" }
+        { key: "words"   value: "words" }
+      ]
+      output_map [ { key: "entities"  value: "entities" } ]
     }
   ]
 }
+```
+
+YAML:
+```yaml
+ensemble_scheduling:
+  steps:
+    - model_name: tokenizer
+      input_map: [{ key: text, value: raw_text }]
+      output_map:
+        - { key: input_ids, value: ids }
+        - { key: words, value: words }
+    - model_name: ner_model
+      input_map:
+        - { key: input_ids, value: ids }
+      output_map: [{ key: logits, value: ner_logits }]
+    - model_name: decoder
+      input_map:
+        - { key: logits, value: ner_logits }
+        - { key: words, value: words }
+      output_map: [{ key: entities, value: entities }]
+```
+
+```bash
+# Ensemble pipeline (duzyazi → entity etiketleri, hic script yok)
+curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[{"name":"raw_text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
+# → "John: B-PER; lives: I-PER; Paris: B-LOC"
+```
+
+### Dizin yapisi
+```
+nlp_model/
+├── tokenizer/           # script — text → token ID'leri + kelimeler
+├── ner_model/           # ONNX — BERT NER
+├── decoder/             # script — logits → entity etiketleri
+└── pipeline/            # Ensemble — declarative zincirleme
 ```
 
 ### Nasil calisir

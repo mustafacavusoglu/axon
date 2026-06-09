@@ -376,27 +376,28 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
   ]}'
 ```
 
-### Example 2: NLP Pipeline (tokenizer → NER)
+### Example 2: NLP Pipeline (tokenizer → ner_model → decoder)
 
-`nlp_model/` contains three models that demonstrate BLS and ensemble chaining:
+`nlp_model/` contains four models that demonstrate BLS and ensemble chaining:
 
 | Model | Type | Description |
 |-------|------|-------------|
-| `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids |
+| `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids, words |
 | `ner_model` | ONNX | BERT-based NER (3 token inputs → logits) |
-| `pipeline` | Ensemble | Declarative: tokenizer → ner_model (no scripting) |
+| `decoder` | Script (BLS) | logits + words → named entities (B-PER, B-LOC…) |
+| `pipeline` | Ensemble | Declarative 3-step: tokenizer → ner_model → decoder |
 
-**Standalone tokenizer `model.rhai`** — reads vocab, tokenizes text into BERT-ready tensors:
+**Tokenizer `model.rhai`** — reads vocab, tokenizes text, outputs words for downstream decoding:
 
 ```rhai
 fn execute(inputs) {
-    let text_tensor = inputs.get("text");
-    let text = text_tensor.as_string();
+    let text = inputs.get("text").as_string();
     // ... build vocab map, split words, convert to token IDs
     return #{
         "input_ids": create_tensor_i64("input_ids", [1, n], input_ids),
         "attention_mask": create_tensor_i64("attention_mask", [1, n], attention_mask),
         "token_type_ids": create_tensor_i64("token_type_ids", [1, n], token_type_ids),
+        "words": create_tensor_string("words", [1], [word_str]),
     };
 }
 ```
@@ -424,11 +425,11 @@ curl -s -X POST http://localhost:8000/v2/models/ner_model/infer \
 Declarative model chaining via `config.pbtxt` / `config.yaml` — **no scripting required**.  
 Use `platform: "ensemble"` and define `ensemble_scheduling` steps with `input_map` / `output_map`.
 
-Each step maps tensors between models: step outputs flow into later step inputs via the ensemble tensor pool.
+Each step maps tensors between models: step outputs flow into later step inputs via the ensemble tensor pool. Intermediate tensors (like `ner_logits`) pass between steps transparently.
 
-### Example: NLP Pipeline (tokenizer → NER)
+### Example: NLP Pipeline (3-step ensemble)
 
-`nlp_model/pipeline/config.pbtxt` — 2-step ensemble that chains `tokenizer` → `ner_model` (both real models in the repo):
+`nlp_model/pipeline/config.pbtxt` — 3-step ensemble that chains `tokenizer` → `ner_model` → `decoder`:
 
 ```protobuf
 name: "pipeline"
@@ -436,11 +437,11 @@ platform: "ensemble"
 max_batch_size: 1
 
 input  { name: "raw_text"  data_type: TYPE_STRING  dims: [1] }
-output { name: "entities"  data_type: TYPE_FP32     dims: [1, -1, 7] }
+output { name: "entities"  data_type: TYPE_STRING  dims: [1] }
 
 ensemble_scheduling {
   step [
-    {   # Step 1: Text → token IDs + attention mask
+    {   # Step 1: Text → token IDs + words
       model_name: "tokenizer"
       model_version: -1
       input_map  [ { key: "text"  value: "raw_text" } ]
@@ -448,6 +449,7 @@ ensemble_scheduling {
         { key: "input_ids"       value: "ids" }
         { key: "attention_mask"  value: "mask" }
         { key: "token_type_ids"  value: "types" }
+        { key: "words"           value: "words" }
       ]
     }
     {   # Step 2: Token IDs → NER logits
@@ -458,7 +460,16 @@ ensemble_scheduling {
         { key: "attention_mask"  value: "mask" }
         { key: "token_type_ids"  value: "types" }
       ]
-      output_map [ { key: "logits"  value: "entities" } ]
+      output_map [ { key: "logits"  value: "ner_logits" } ]
+    }
+    {   # Step 3: logits + words → named entities
+      model_name: "decoder"
+      model_version: -1
+      input_map [
+        { key: "logits"  value: "ner_logits" }
+        { key: "words"   value: "words" }
+      ]
+      output_map [ { key: "entities"  value: "entities" } ]
     }
   ]
 }
@@ -471,6 +482,15 @@ YAML is cleaner:
 name: pipeline
 platform: ensemble
 
+inputs:
+  - name: raw_text
+    data_type: TYPE_STRING
+    dims: [1]
+outputs:
+  - name: entities
+    data_type: TYPE_STRING
+    dims: [1]
+
 ensemble_scheduling:
   steps:
     - model_name: tokenizer
@@ -478,18 +498,25 @@ ensemble_scheduling:
       output_map:
         - { key: input_ids, value: ids }
         - { key: attention_mask, value: mask }
+        - { key: words, value: words }
     - model_name: ner_model
       input_map:
         - { key: input_ids, value: ids }
         - { key: attention_mask, value: mask }
-      output_map: [{ key: logits, value: entities }]
+      output_map: [{ key: logits, value: ner_logits }]
+    - model_name: decoder
+      input_map:
+        - { key: logits, value: ner_logits }
+        - { key: words, value: words }
+      output_map: [{ key: entities, value: entities }]
 ```
 
 ```bash
-# Ensemble pipeline (text → raw logits, declarative — no scripting)
+# Ensemble pipeline (text → named entities, declarative — no scripting)
 curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
   -H 'Content-Type: application/json' \
   -d '{"inputs":[{"name":"raw_text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
+# → "John: B-PER; lives: I-PER; Paris: B-LOC"
 ```
 
 ### Directory layout
@@ -498,12 +525,15 @@ curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
 nlp_model/
 ├── tokenizer/
 │   ├── config.yaml           # platform: "script"
-│   ├── 1/model.rhai          # text → token IDs
+│   ├── 1/model.rhai          # text → token IDs + words
 │   └── 1/vocab.txt
 ├── ner_model/
 │   ├── config.yaml           # platform: "onnxruntime_onnx"
 │   └── 1/model.onnx
-└── pipeline/                 # Ensemble: tokenizer → ner_model (declarative)
+├── decoder/
+│   ├── config.yaml           # platform: "script"
+│   └── 1/model.rhai          # logits + words → named entities
+└── pipeline/                 # Ensemble: tokenizer → ner_model → decoder
     ├── config.yaml
     └── 1/                    # version dir (empty)
 ```

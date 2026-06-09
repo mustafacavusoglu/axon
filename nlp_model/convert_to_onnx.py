@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 MODEL_NAME = "akdeniz27/bert-base-turkish-cased-ner"
-OUTPUT_DIR = Path(__file__).parent / "ner_pipeline" / "1"
+OUTPUT_DIR = Path(__file__).parent / "ner_model" / "1"
 
 def main():
     os.environ["TOKENIZERS_PARALLELISM"] = "false"
