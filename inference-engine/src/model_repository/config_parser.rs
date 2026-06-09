@@ -187,21 +187,19 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
                                 });
                             }
                         }
-                        "step" => {
-                            if in_list {
-                                if let Some(step) = current_step.take() {
-                                    let ens = cfg
-                                        .ensemble_scheduling
-                                        .get_or_insert(EnsembleScheduling { steps: Vec::new() });
-                                    ens.steps.push(step);
-                                }
-                                current_step = Some(EnsembleStep {
-                                    model_name: String::new(),
-                                    model_version: -1,
-                                    input_map: Vec::new(),
-                                    output_map: Vec::new(),
-                                });
+                        "step" if in_list => {
+                            if let Some(step) = current_step.take() {
+                                let ens = cfg
+                                    .ensemble_scheduling
+                                    .get_or_insert(EnsembleScheduling { steps: Vec::new() });
+                                ens.steps.push(step);
                             }
+                            current_step = Some(EnsembleStep {
+                                model_name: String::new(),
+                                model_version: -1,
+                                input_map: Vec::new(),
+                                output_map: Vec::new(),
+                            });
                         }
                         _ => {}
                     }
