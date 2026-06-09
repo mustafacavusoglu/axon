@@ -376,42 +376,45 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
   ]}'
 ```
 
-### Example 2: NLP NER Pipeline (BLS — three-model chain)
+### Example 2: NLP Pipeline (tokenizer → NER)
 
-`nlp_model/` contains four models that demonstrate BLS and ensemble chaining:
+`nlp_model/` contains three models that demonstrate BLS and ensemble chaining:
 
 | Model | Type | Description |
 |-------|------|-------------|
 | `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids |
 | `ner_model` | ONNX | BERT-based NER (3 token inputs → logits) |
-| `ner_pipeline` | Script (BLS) | `infer("tokenizer")` → `infer("ner_model")` → decode entities |
 | `pipeline` | Ensemble | Declarative: tokenizer → ner_model (no scripting) |
 
-**ner_pipeline `model.rhai`** — calls tokenizer and ner_model via BLS, decodes logits:
+**Standalone tokenizer `model.rhai`** — reads vocab, tokenizes text into BERT-ready tensors:
 
 ```rhai
 fn execute(inputs) {
-    let tokenized = infer("tokenizer", #{ "text": inputs.get("text") });
-
-    let result = infer("ner_model", #{
-        "input_ids": tokenized.get("input_ids"),
-        "attention_mask": tokenized.get("attention_mask"),
-        "token_type_ids": tokenized.get("token_type_ids"),
-    });
-
-    let logits = result.get("logits").as_f64();
-    let labels = ["O","B-PER","I-PER","B-ORG","I-ORG","B-LOC","I-LOC"];
-    // ... decode logits to entity strings
-    return #{ "entities": create_tensor_string("entities", [1], [output]) };
+    let text_tensor = inputs.get("text");
+    let text = text_tensor.as_string();
+    // ... build vocab map, split words, convert to token IDs
+    return #{
+        "input_ids": create_tensor_i64("input_ids", [1, n], input_ids),
+        "attention_mask": create_tensor_i64("attention_mask", [1, n], attention_mask),
+        "token_type_ids": create_tensor_i64("token_type_ids", [1, n], token_type_ids),
+    };
 }
 ```
 
 ```bash
-# Plain text input — tokenizer handles vocab lookup inline
-curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
+# Tokenize plain text
+curl -s -X POST http://localhost:8000/v2/models/tokenizer/infer \
   -H 'Content-Type: application/json' \
   -d '{"inputs":[{"name":"text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
-# Output: "token 1 (id=7255): B-PER; token 4 (id=7700): B-LOC"
+
+# Direct NER model inference
+curl -s -X POST http://localhost:8000/v2/models/ner_model/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[
+    {"name":"input_ids","shape":[1,6],"datatype":"INT64","data":[2,7255,1,2091,7700,3]},
+    {"name":"attention_mask","shape":[1,6],"datatype":"INT64","data":[1,1,1,1,1,1]},
+    {"name":"token_type_ids","shape":[1,6],"datatype":"INT64","data":[0,0,0,0,0,0]}
+  ]}'
 ```
 
 ---
@@ -482,23 +485,8 @@ ensemble_scheduling:
       output_map: [{ key: logits, value: entities }]
 ```
 
-### Ensemble vs BLS comparison
-
-| | BLS (ner_pipeline) | Ensemble (pipeline) |
-|---|---|---|
-| How | `infer()` calls in Rhai script | Declarative config.pbtxt |
-| Tokenizer | Calls tokenizer model via BLS | Step 1 runs tokenizer model |
-| NER | Calls ner_model via BLS | Step 2 runs ner_model |
-| Decode | Rhai logic (logits → strings) | N/A (raw logits output) |
-| Scripting required | Yes | **No** |
-
 ```bash
-# BLS pipeline (full text → entities)
-curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
-  -H 'Content-Type: application/json' \
-  -d '{"inputs":[{"name":"text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
-
-# Ensemble pipeline (text → raw logits, no decode script)
+# Ensemble pipeline (text → raw logits, declarative — no scripting)
 curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
   -H 'Content-Type: application/json' \
   -d '{"inputs":[{"name":"raw_text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
@@ -515,9 +503,6 @@ nlp_model/
 ├── ner_model/
 │   ├── config.yaml           # platform: "onnxruntime_onnx"
 │   └── 1/model.onnx
-├── ner_pipeline/             # BLS: tokenizer → ner_model → decode
-│   ├── config.yaml
-│   └── 1/model.rhai
 └── pipeline/                 # Ensemble: tokenizer → ner_model (declarative)
     ├── config.yaml
     └── 1/                    # version dir (empty)

@@ -376,42 +376,45 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
   ]}'
 ```
 
-### Ornek 2: NLP NER Pipeline (BLS — uc model zinciri)
+### Ornek 2: NLP Pipeline (tokenizer → NER)
 
-`nlp_model/` altinda BLS ve ensemble zincirlemeyi gosteren dort model bulunur:
+`nlp_model/` altinda BLS ve ensemble zincirlemeyi gosteren uc model bulunur:
 
 | Model | Tip | Aciklama |
 |-------|-----|----------|
 | `tokenizer` | Script (BLS) | Text → input_ids, attention_mask, token_type_ids |
 | `ner_model` | ONNX | BERT tabanli NER (3 token girdisi → logits) |
-| `ner_pipeline` | Script (BLS) | `infer("tokenizer")` → `infer("ner_model")` → decode |
 | `pipeline` | Ensemble | Declarative: tokenizer → ner_model (script gerektirmez) |
 
-**ner_pipeline `model.rhai`** — tokenizer ve ner_model'i BLS ile cagirir:
+**Tokenizer `model.rhai`** — vocab okur, duzyaziyi BERT tensor'lerine cevirir:
 
 ```rhai
 fn execute(inputs) {
-    let tokenized = infer("tokenizer", #{ "text": inputs.get("text") });
-
-    let result = infer("ner_model", #{
-        "input_ids": tokenized.get("input_ids"),
-        "attention_mask": tokenized.get("attention_mask"),
-        "token_type_ids": tokenized.get("token_type_ids"),
-    });
-
-    let logits = result.get("logits").as_f64();
-    let labels = ["O","B-PER","I-PER","B-ORG","I-ORG","B-LOC","I-LOC"];
-    // ... entity decode
-    return #{ "entities": create_tensor_string("entities", [1], [output]) };
+    let text_tensor = inputs.get("text");
+    let text = text_tensor.as_string();
+    // ... vocab map, split_words, token ID'lerine donusturme
+    return #{
+        "input_ids": create_tensor_i64("input_ids", [1, n], input_ids),
+        "attention_mask": create_tensor_i64("attention_mask", [1, n], attention_mask),
+        "token_type_ids": create_tensor_i64("token_type_ids", [1, n], token_type_ids),
+    };
 }
 ```
 
 ```bash
-# Duzyazi girdisi — tokenizer vocab lookup'i inline yapar
-curl -s -X POST http://localhost:8000/v2/models/ner_pipeline/infer \
+# Duzyaziyi tokenize et
+curl -s -X POST http://localhost:8000/v2/models/tokenizer/infer \
   -H 'Content-Type: application/json' \
   -d '{"inputs":[{"name":"text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
-# Cikti: "token 1 (id=7255): B-PER; token 4 (id=7700): B-LOC"
+
+# NER modeline direkt istek
+curl -s -X POST http://localhost:8000/v2/models/ner_model/infer \
+  -H 'Content-Type: application/json' \
+  -d '{"inputs":[
+    {"name":"input_ids","shape":[1,6],"datatype":"INT64","data":[2,7255,1,2091,7700,3]},
+    {"name":"attention_mask","shape":[1,6],"datatype":"INT64","data":[1,1,1,1,1,1]},
+    {"name":"token_type_ids","shape":[1,6],"datatype":"INT64","data":[0,0,0,0,0,0]}
+  ]}'
 ```
 
 ---
@@ -457,25 +460,6 @@ ensemble_scheduling {
     }
   ]
 }
-```
-
-### BLS vs Ensemble karsilastirmasi
-
-| | BLS (ner_pipeline) | Ensemble (pipeline) |
-|---|---|---|
-| Yontem | Rhai script icinde `infer()` | Declarative config |
-| Tokenizer | `infer("tokenizer", ...)` | Adim 1: tokenizer modeli |
-| NER | `infer("ner_model", ...)` | Adim 2: ner_model |
-| Decode | Rhai script (logits → string) | Yok (ham logits) |
-| Script gerekir mi | Evet | **Hayir** |
-
-### Dizin yapisi
-```
-nlp_model/
-├── tokenizer/           # script — text → token ID'leri
-├── ner_model/           # ONNX — BERT NER
-├── ner_pipeline/        # BLS — tokenizer → ner_model → decode
-└── pipeline/            # Ensemble — declarative zincirleme
 ```
 
 ### Nasil calisir

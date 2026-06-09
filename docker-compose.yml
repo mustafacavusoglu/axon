@@ -10,11 +10,13 @@ services:
       - "8001:8001"
       - "8002:8002"
     volumes:
-      - ${MODEL_REPO_PATH:-./local_models/model_repository}:/models:ro
+      - ./ml_model/xgb_housing:/models/xgb_housing:ro
+      - ./nlp_model/tokenizer:/models/tokenizer:ro
+      - ./nlp_model/ner_model:/models/ner_model:ro
+      - ./nlp_model/pipeline:/models/pipeline:ro
     command:
       - "--model-repository=/models"
       - "--model-control-mode=poll"
-      - "--repository-poll-secs=30"
       - "--http-port=8000"
       - "--grpc-port=8001"
       - "--metrics-port=8002"
