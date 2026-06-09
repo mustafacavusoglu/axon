@@ -116,6 +116,33 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
                         }
                     }
                 }
+            } else if platform == "ensemble" {
+                let config = match config.as_ref() {
+                    Some(c) => c,
+                    None => {
+                        tracing::warn!(model = %model_name, "ensemble model missing config");
+                        continue;
+                    }
+                };
+
+                let load_start = std::time::Instant::now();
+                match pool.load_ensemble_model(&model_name, version, config, concurrency) {
+                    Ok(_) => {
+                        let load_secs = load_start.elapsed().as_secs_f64();
+                        metrics::record_model_load_duration(&model_name, load_secs);
+                        metrics::set_model_ready(&model_name, version);
+                        if let Ok(mut cb) = get_circuit_breaker().lock() {
+                            cb.record_success(&cb_key);
+                        }
+                    }
+                    Err(e) => {
+                        tracing::error!(model = %model_name, version, error = %e, "failed to load ensemble model");
+                        metrics::record_model_load_error(&model_name);
+                        if let Ok(mut cb) = get_circuit_breaker().lock() {
+                            cb.record_failure(&cb_key);
+                        }
+                    }
+                }
             } else {
                 let model_file = model_dir.join(version.to_string()).join("model.onnx");
                 if !model_file.exists() {
@@ -190,6 +217,21 @@ fn discover_versions(model_dir: &Path) -> Vec<u32> {
 }
 
 fn load_model_config(model_dir: &Path) -> Option<ModelConfig> {
+    let yaml_path = model_dir.join("config.yaml");
+    if yaml_path.exists() {
+        match std::fs::read(&yaml_path) {
+            Ok(content) => match config_parser::parse_model_config_yaml(&content) {
+                Ok(cfg) => return Some(cfg),
+                Err(e) => {
+                    tracing::warn!(path = %yaml_path.display(), error = %e, "failed to parse config.yaml, falling back to config.pbtxt");
+                }
+            },
+            Err(e) => {
+                tracing::warn!(path = %yaml_path.display(), error = %e, "failed to read config.yaml");
+            }
+        }
+    }
+
     let config_path = model_dir.join("config.pbtxt");
     if !config_path.exists() {
         return None;

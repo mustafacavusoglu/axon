@@ -1,0 +1,38 @@
+name: preprocess_ml
+platform: script
+max_batch_size: 1
+
+inputs:
+  - name: median_income
+    data_type: TYPE_FP32
+    dims: [1]
+  - name: house_age
+    data_type: TYPE_FP32
+    dims: [1]
+  - name: avg_rooms
+    data_type: TYPE_FP32
+    dims: [1]
+  - name: avg_bedrooms
+    data_type: TYPE_FP32
+    dims: [1]
+  - name: population
+    data_type: TYPE_FP32
+    dims: [1]
+  - name: avg_occupancy
+    data_type: TYPE_FP32
+    dims: [1]
+  - name: latitude
+    data_type: TYPE_FP32
+    dims: [1]
+  - name: longitude
+    data_type: TYPE_FP32
+    dims: [1]
+
+outputs:
+  - name: variable
+    data_type: TYPE_FP32
+    dims: [1, 1]
+
+instance_groups:
+  - count: 2
+    kind: KIND_CPU

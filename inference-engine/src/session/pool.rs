@@ -5,6 +5,7 @@ use anyhow::Context;
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
 
+use crate::model_repository::config_parser::ModelConfig;
 use crate::session::runner::ModelRunner;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,6 +125,41 @@ impl SessionPool {
 
         self.sessions.insert(key, session.clone());
         tracing::info!(name, version, instances = count, "script model loaded");
+        Ok(session)
+    }
+
+    pub fn load_ensemble_model(
+        &self,
+        name: &str,
+        version: u32,
+        config: &ModelConfig,
+        concurrency: u32,
+    ) -> anyhow::Result<Arc<ModelSession>> {
+        let key = model_key(name, version);
+
+        if let Some(existing) = self.sessions.get(&key) {
+            if existing.state == SessionState::Ready {
+                return Ok(existing.clone());
+            }
+        }
+
+        let count = if concurrency > 0 {
+            concurrency as usize
+        } else {
+            4
+        };
+
+        let runner = ModelRunner::load_ensemble(config, self.clone(), count)?;
+
+        let session = Arc::new(ModelSession {
+            name: name.to_string(),
+            version,
+            state: SessionState::Ready,
+            runner: Arc::new(runner),
+        });
+
+        self.sessions.insert(key, session.clone());
+        tracing::info!(name, version, instances = count, "ensemble model loaded");
         Ok(session)
     }
 
