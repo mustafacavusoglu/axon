@@ -260,4 +260,234 @@ fn register_tabular_functions(engine: &mut Engine) {
     );
 }
 
-fn register_cv_functions(_engine: &mut Engine) {}
+fn register_cv_functions(engine: &mut Engine) {
+    engine.register_fn(
+        "decode_image",
+        |data: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+            use base64::Engine as B64Engine;
+            let bytes = base64::engine::general_purpose::STANDARD
+                .decode(data)
+                .map_err(|e| format!("base64 decode failed: {e}"))?;
+            let img = image::load_from_memory(&bytes)
+                .map_err(|e| format!("image decode failed: {e}"))?;
+            let rgb = img.to_rgb8();
+            let (w, h) = rgb.dimensions();
+            let pixels: rhai::Array = rgb
+                .as_raw()
+                .iter()
+                .map(|&p| Dynamic::from(p as f64))
+                .collect();
+            let mut map = rhai::Map::new();
+            map.insert("pixels".into(), Dynamic::from(pixels));
+            map.insert("width".into(), Dynamic::from(w as i64));
+            map.insert("height".into(), Dynamic::from(h as i64));
+            map.insert("channels".into(), Dynamic::from(3_i64));
+            Ok(map)
+        },
+    );
+
+    engine.register_fn(
+        "resize_image",
+        |pixels: rhai::Array,
+         src_h: i64,
+         src_w: i64,
+         dst_h: i64,
+         dst_w: i64,
+         channels: i64|
+         -> rhai::Array {
+            let sh = src_h as usize;
+            let sw = src_w as usize;
+            let dh = dst_h as usize;
+            let dw = dst_w as usize;
+            let ch = channels as usize;
+            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let mut dst = vec![0.0f64; dh * dw * ch];
+            let scale_y = if dh > 1 {
+                (sh as f64 - 1.0) / (dh as f64 - 1.0)
+            } else {
+                0.0
+            };
+            let scale_x = if dw > 1 {
+                (sw as f64 - 1.0) / (dw as f64 - 1.0)
+            } else {
+                0.0
+            };
+            for y in 0..dh {
+                for x in 0..dw {
+                    let sy = y as f64 * scale_y;
+                    let sx = x as f64 * scale_x;
+                    let y0 = sy.floor() as usize;
+                    let x0 = sx.floor() as usize;
+                    let y1 = (y0 + 1).min(sh - 1);
+                    let x1 = (x0 + 1).min(sw - 1);
+                    let fy = sy - y0 as f64;
+                    let fx = sx - x0 as f64;
+                    for c in 0..ch {
+                        let v00 = src[(y0 * sw + x0) * ch + c];
+                        let v01 = src[(y0 * sw + x1) * ch + c];
+                        let v10 = src[(y1 * sw + x0) * ch + c];
+                        let v11 = src[(y1 * sw + x1) * ch + c];
+                        dst[(y * dw + x) * ch + c] = v00 * (1.0 - fx) * (1.0 - fy)
+                            + v01 * fx * (1.0 - fy)
+                            + v10 * (1.0 - fx) * fy
+                            + v11 * fx * fy;
+                    }
+                }
+            }
+            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+        },
+    );
+
+    engine.register_fn(
+        "normalize_image",
+        |pixels: rhai::Array, mean: rhai::Array, std: rhai::Array| -> rhai::Array {
+            let mean_vals: Vec<f64> = mean.iter().map(|v| to_f64(v)).collect();
+            let std_vals: Vec<f64> = std.iter().map(|v| to_f64(v)).collect();
+            let ch = mean_vals.len();
+            pixels
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let c = i % ch;
+                    let s = if std_vals[c] != 0.0 {
+                        std_vals[c]
+                    } else {
+                        1.0
+                    };
+                    Dynamic::from((to_f64(v) - mean_vals[c]) / s)
+                })
+                .collect()
+        },
+    );
+
+    engine.register_fn(
+        "image_to_chw",
+        |pixels: rhai::Array, h: i64, w: i64, c: i64| -> rhai::Array {
+            let height = h as usize;
+            let width = w as usize;
+            let channels = c as usize;
+            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let mut dst = vec![0.0f64; height * width * channels];
+            for y in 0..height {
+                for x in 0..width {
+                    for ch in 0..channels {
+                        dst[ch * height * width + y * width + x] =
+                            src[(y * width + x) * channels + ch];
+                    }
+                }
+            }
+            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+        },
+    );
+
+    engine.register_fn(
+        "center_crop",
+        |pixels: rhai::Array,
+         src_h: i64,
+         src_w: i64,
+         crop_h: i64,
+         crop_w: i64,
+         channels: i64|
+         -> rhai::Array {
+            let sh = src_h as usize;
+            let sw = src_w as usize;
+            let ch_val = crop_h as usize;
+            let cw = crop_w as usize;
+            let c = channels as usize;
+            let start_y = (sh.saturating_sub(ch_val)) / 2;
+            let start_x = (sw.saturating_sub(cw)) / 2;
+            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let mut dst = Vec::with_capacity(ch_val * cw * c);
+            for y in 0..ch_val {
+                for x in 0..cw {
+                    let sy = start_y + y;
+                    let sx = start_x + x;
+                    for ch in 0..c {
+                        dst.push(src[(sy * sw + sx) * c + ch]);
+                    }
+                }
+            }
+            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+        },
+    );
+
+    engine.register_fn(
+        "grayscale",
+        |pixels: rhai::Array, h: i64, w: i64| -> rhai::Array {
+            let height = h as usize;
+            let width = w as usize;
+            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let mut dst = Vec::with_capacity(height * width);
+            for i in 0..(height * width) {
+                let r = src[i * 3];
+                let g = src[i * 3 + 1];
+                let b = src[i * 3 + 2];
+                dst.push(0.2989 * r + 0.5870 * g + 0.1140 * b);
+            }
+            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+        },
+    );
+
+    engine.register_fn(
+        "nms",
+        |boxes: rhai::Array,
+         scores: rhai::Array,
+         iou_threshold: f64|
+         -> rhai::Array {
+            let n = scores.len();
+            let sc: Vec<f64> = scores.iter().map(|v| to_f64(v)).collect();
+            let bx: Vec<[f64; 4]> = boxes
+                .iter()
+                .map(|v| {
+                    let arr = v.clone().into_typed_array::<Dynamic>().unwrap_or_default();
+                    let mut b = [0.0f64; 4];
+                    for (i, val) in arr.iter().take(4).enumerate() {
+                        b[i] = to_f64(val);
+                    }
+                    b
+                })
+                .collect();
+
+            let mut indices: Vec<usize> = (0..n).collect();
+            indices.sort_by(|&a, &b| {
+                sc[b].partial_cmp(&sc[a]).unwrap_or(std::cmp::Ordering::Equal)
+            });
+
+            let mut keep: Vec<i64> = Vec::new();
+            let mut suppressed = vec![false; n];
+
+            for &i in &indices {
+                if suppressed[i] {
+                    continue;
+                }
+                keep.push(i as i64);
+                for &j in &indices {
+                    if suppressed[j] || j == i {
+                        continue;
+                    }
+                    let iou = compute_iou(&bx[i], &bx[j]);
+                    if iou >= iou_threshold {
+                        suppressed[j] = true;
+                    }
+                }
+            }
+            keep.into_iter().map(|v| Dynamic::from(v)).collect()
+        },
+    );
+}
+
+fn compute_iou(a: &[f64; 4], b: &[f64; 4]) -> f64 {
+    let x1 = a[0].max(b[0]);
+    let y1 = a[1].max(b[1]);
+    let x2 = a[2].min(b[2]);
+    let y2 = a[3].min(b[3]);
+    let inter = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+    let area_a = (a[2] - a[0]) * (a[3] - a[1]);
+    let area_b = (b[2] - b[0]) * (b[3] - b[1]);
+    let union = area_a + area_b - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
+}
