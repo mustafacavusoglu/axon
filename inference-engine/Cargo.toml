@@ -38,6 +38,9 @@ parking_lot = "0.12"
 notify = { version = "7", features = ["macos_fsevent"] }
 rhai = { version = "1", features = ["sync"] }
 tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
+regex = "1"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
+base64 = "0.22"
 
 [build-dependencies]
 tonic-build = "0.12"

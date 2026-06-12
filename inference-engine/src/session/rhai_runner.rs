@@ -275,6 +275,8 @@ impl RhaiRunner {
             Arc::new(PLMutex::new(None))
         };
 
+        super::rhai_builtins::register_all(&mut engine, tokenizer.clone());
+
         engine.register_fn(
             "tokenize",
             move |text: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
