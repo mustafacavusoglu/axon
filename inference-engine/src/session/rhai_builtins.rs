@@ -150,6 +150,114 @@ fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tok
     );
 }
 
-fn register_tabular_functions(_engine: &mut Engine) {}
+fn register_tabular_functions(engine: &mut Engine) {
+    engine.register_fn(
+        "normalize",
+        |arr: rhai::Array, method: &str| -> rhai::Array {
+            let values: Vec<f64> = arr.iter().map(|v| to_f64(v)).collect();
+            match method {
+                "minmax" => {
+                    let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
+                    let max = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                    let range = max - min;
+                    if range == 0.0 {
+                        values.iter().map(|_| Dynamic::from(0.0_f64)).collect()
+                    } else {
+                        values
+                            .iter()
+                            .map(|&v| Dynamic::from((v - min) / range))
+                            .collect()
+                    }
+                }
+                "l2" => {
+                    let norm: f64 = values.iter().map(|&v| v * v).sum::<f64>().sqrt();
+                    if norm == 0.0 {
+                        values.iter().map(|_| Dynamic::from(0.0_f64)).collect()
+                    } else {
+                        values
+                            .iter()
+                            .map(|&v| Dynamic::from(v / norm))
+                            .collect()
+                    }
+                }
+                _ => arr,
+            }
+        },
+    );
+
+    engine.register_fn(
+        "standardize",
+        |arr: rhai::Array, mean: f64, std_dev: f64| -> rhai::Array {
+            arr.iter()
+                .map(|v| {
+                    let x = to_f64(v);
+                    Dynamic::from(if std_dev != 0.0 {
+                        (x - mean) / std_dev
+                    } else {
+                        0.0
+                    })
+                })
+                .collect()
+        },
+    );
+
+    engine.register_fn(
+        "one_hot",
+        |index: i64, num_classes: i64| -> rhai::Array {
+            (0..num_classes)
+                .map(|i| Dynamic::from(if i == index { 1.0_f64 } else { 0.0_f64 }))
+                .collect()
+        },
+    );
+
+    engine.register_fn(
+        "label_encode",
+        |value: &str, mapping: rhai::Map| -> i64 {
+            mapping
+                .get(value)
+                .and_then(|v| v.as_int().ok())
+                .unwrap_or(-1)
+        },
+    );
+
+    engine.register_fn(
+        "fill_missing",
+        |arr: rhai::Array, strategy: &str| -> rhai::Array {
+            let values: Vec<f64> = arr.iter().map(|v| to_f64(v)).collect();
+            let valid: Vec<f64> = values.iter().filter(|v| !v.is_nan()).cloned().collect();
+            let fill_val = match strategy {
+                "zero" => 0.0,
+                "mean" => {
+                    if valid.is_empty() {
+                        0.0
+                    } else {
+                        valid.iter().sum::<f64>() / valid.len() as f64
+                    }
+                }
+                "median" => {
+                    if valid.is_empty() {
+                        0.0
+                    } else {
+                        let mut sorted = valid.clone();
+                        sorted.sort_by(|a, b| {
+                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
+                        });
+                        let mid = sorted.len() / 2;
+                        if sorted.len() % 2 == 0 {
+                            (sorted[mid - 1] + sorted[mid]) / 2.0
+                        } else {
+                            sorted[mid]
+                        }
+                    }
+                }
+                _ => 0.0,
+            };
+            values
+                .iter()
+                .map(|&v| Dynamic::from(if v.is_nan() { fill_val } else { v }))
+                .collect()
+        },
+    );
+}
 
 fn register_cv_functions(_engine: &mut Engine) {}
