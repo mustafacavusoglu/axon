@@ -1,7 +1,8 @@
 *.onnx
 *.onnx.data
 *.pb.rs
-
+.DS_Store
+axon-server
 .venv/
 __pycache__/
 *.pyc

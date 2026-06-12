@@ -37,6 +37,7 @@ tower-http = { version = "0.6", features = ["cors"] }
 parking_lot = "0.12"
 notify = { version = "7", features = ["macos_fsevent"] }
 rhai = { version = "1", features = ["sync"] }
+tokenizers = { version = "0.21", default-features = false, features = ["onig"] }
 
 [build-dependencies]
 tonic-build = "0.12"

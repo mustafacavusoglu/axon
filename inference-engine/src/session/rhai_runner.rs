@@ -1,7 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use parking_lot::Mutex as PLMutex;
 use rhai::{Dynamic, Engine, Scope, AST};
+use tokenizers::Tokenizer;
 use tokio::sync::Semaphore;
 
 use super::types::{InferenceOutput, InputTensor, TensorData};
@@ -252,6 +254,67 @@ impl RhaiRunner {
             }
             words
         });
+
+        let script_dir3 = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let tokenizer_path = script_dir3.join("tokenizer.json");
+        let tokenizer: Arc<PLMutex<Option<Tokenizer>>> = if tokenizer_path.exists() {
+            match Tokenizer::from_file(&tokenizer_path) {
+                Ok(t) => {
+                    tracing::info!("loaded tokenizer.json from {}", tokenizer_path.display());
+                    Arc::new(PLMutex::new(Some(t)))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to load tokenizer.json from {}: {e}",
+                        tokenizer_path.display()
+                    );
+                    Arc::new(PLMutex::new(None))
+                }
+            }
+        } else {
+            Arc::new(PLMutex::new(None))
+        };
+
+        engine.register_fn(
+            "tokenize",
+            move |text: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+                let tok = tokenizer.lock();
+                let tokenizer = tok
+                    .as_ref()
+                    .ok_or_else(|| "tokenizer.json not loaded".to_string())?;
+                let encoding = tokenizer
+                    .encode(text, true)
+                    .map_err(|e| format!("tokenization failed: {e}"))?;
+                let ids: Vec<i64> =
+                    encoding.get_ids().iter().map(|&id| id as i64).collect();
+                let mask: Vec<i64> = encoding
+                    .get_attention_mask()
+                    .iter()
+                    .map(|&m| m as i64)
+                    .collect();
+                let n = ids.len() as i64;
+                let mut map = rhai::Map::new();
+                map.insert(
+                    "input_ids".into(),
+                    Dynamic::from(RhaiTensor {
+                        name: "input_ids".to_string(),
+                        shape: vec![1, n],
+                        datatype: "INT64".to_string(),
+                        data: RhaiTensorData::I64(ids),
+                    }),
+                );
+                map.insert(
+                    "attention_mask".into(),
+                    Dynamic::from(RhaiTensor {
+                        name: "attention_mask".to_string(),
+                        shape: vec![1, n],
+                        datatype: "INT64".to_string(),
+                        data: RhaiTensorData::I64(mask),
+                    }),
+                );
+                Ok(map)
+            },
+        );
 
         let bls_pool = pool.clone();
         engine.register_fn(
