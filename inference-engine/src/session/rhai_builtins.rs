@@ -102,7 +102,53 @@ fn register_math_functions(engine: &mut Engine) {
     );
 }
 
-fn register_nlp_functions(_engine: &mut Engine, _tokenizer: Arc<PLMutex<Option<Tokenizer>>>) {}
+fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tokenizer>>>) {
+    engine.register_fn(
+        "pad_sequence",
+        |arr: rhai::Array, target_len: i64, pad_value: i64| -> rhai::Array {
+            let len = target_len.max(0) as usize;
+            if arr.len() >= len {
+                arr[..len].to_vec()
+            } else {
+                let mut result = arr;
+                result.resize(len, Dynamic::from(pad_value));
+                result
+            }
+        },
+    );
+
+    engine.register_fn("text_lower", |text: &str| -> String {
+        text.to_lowercase()
+    });
+
+    engine.register_fn(
+        "regex_replace",
+        |text: &str,
+         pattern: &str,
+         replacement: &str|
+         -> Result<String, Box<rhai::EvalAltResult>> {
+            let re = regex::Regex::new(pattern)
+                .map_err(|e| format!("invalid regex '{}': {e}", pattern))?;
+            Ok(re.replace_all(text, replacement).to_string())
+        },
+    );
+
+    engine.register_fn(
+        "decode_tokens",
+        move |ids: rhai::Array| -> Result<String, Box<rhai::EvalAltResult>> {
+            let tok = tokenizer.lock();
+            let t = tok
+                .as_ref()
+                .ok_or_else(|| "tokenizer.json not loaded".to_string())?;
+            let token_ids: Vec<u32> = ids
+                .iter()
+                .map(|v| v.as_int().unwrap_or(0) as u32)
+                .collect();
+            t.decode(&token_ids, true)
+                .map_err(|e| format!("decode failed: {e}").into())
+        },
+    );
+}
 
 fn register_tabular_functions(_engine: &mut Engine) {}
 
