@@ -476,6 +476,354 @@ fn register_cv_functions(engine: &mut Engine) {
     );
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn make_engine() -> Engine {
+        let mut engine = Engine::new();
+        let tokenizer = Arc::new(PLMutex::new(None));
+        register_all(&mut engine, tokenizer);
+        engine
+    }
+
+    fn approx_eq(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-6
+    }
+
+    #[test]
+    fn test_softmax() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("softmax([1.0, 2.0, 3.0])")
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        let sum: f64 = vals.iter().sum();
+        assert!(approx_eq(sum, 1.0));
+        assert!(vals[2] > vals[1]);
+        assert!(vals[1] > vals[0]);
+    }
+
+    #[test]
+    fn test_softmax_integers() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("softmax([1, 2, 3])")
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals.iter().sum::<f64>(), 1.0));
+    }
+
+    #[test]
+    fn test_sigmoid() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("sigmoid([0.0])")
+            .unwrap();
+        assert!(approx_eq(result[0].as_float().unwrap(), 0.5));
+
+        let result2 = engine
+            .eval::<rhai::Array>("sigmoid([100.0, -100.0])")
+            .unwrap();
+        assert!(result2[0].as_float().unwrap() > 0.99);
+        assert!(result2[1].as_float().unwrap() < 0.01);
+    }
+
+    #[test]
+    fn test_argmax() {
+        let engine = make_engine();
+        assert_eq!(engine.eval::<i64>("argmax([1.0, 3.0, 2.0])").unwrap(), 1);
+        assert_eq!(engine.eval::<i64>("argmax([5, 1, 3])").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_argmin() {
+        let engine = make_engine();
+        assert_eq!(engine.eval::<i64>("argmin([3.0, 1.0, 2.0])").unwrap(), 1);
+        assert_eq!(engine.eval::<i64>("argmin([5, 1, 3])").unwrap(), 1);
+    }
+
+    #[test]
+    fn test_topk() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("topk([1.0, 5.0, 3.0, 4.0, 2.0], 2)")
+            .unwrap();
+        assert_eq!(result.len(), 2);
+        let first = result[0].clone().cast::<rhai::Map>();
+        let second = result[1].clone().cast::<rhai::Map>();
+        assert_eq!(first.get("index").unwrap().as_int().unwrap(), 1);
+        assert!(approx_eq(first.get("value").unwrap().as_float().unwrap(), 5.0));
+        assert_eq!(second.get("index").unwrap().as_int().unwrap(), 3);
+    }
+
+    #[test]
+    fn test_threshold() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("threshold([0.3, 0.7, 0.5], 0.5)")
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert_eq!(vals, vec![0.0, 1.0, 1.0]);
+    }
+
+    #[test]
+    fn test_clip() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("clip([-1.0, 0.5, 2.0], 0.0, 1.0)")
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert_eq!(vals, vec![0.0, 0.5, 1.0]);
+    }
+
+    #[test]
+    fn test_pad_sequence_padding() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("pad_sequence([1, 2, 3], 5, 0)")
+            .unwrap();
+        let vals: Vec<i64> = result.iter().map(|v| v.as_int().unwrap()).collect();
+        assert_eq!(vals, vec![1, 2, 3, 0, 0]);
+    }
+
+    #[test]
+    fn test_pad_sequence_truncation() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("pad_sequence([1, 2, 3, 4, 5], 3, 0)")
+            .unwrap();
+        let vals: Vec<i64> = result.iter().map(|v| v.as_int().unwrap()).collect();
+        assert_eq!(vals, vec![1, 2, 3]);
+    }
+
+    #[test]
+    fn test_text_lower() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<String>(r#"text_lower("Hello WORLD")"#)
+            .unwrap();
+        assert_eq!(result, "hello world");
+    }
+
+    #[test]
+    fn test_regex_replace() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<String>(r#"regex_replace("foo123bar456", "[0-9]+", "")"#)
+            .unwrap();
+        assert_eq!(result, "foobar");
+    }
+
+    #[test]
+    fn test_decode_tokens_no_tokenizer() {
+        let engine = make_engine();
+        let result = engine.eval::<String>("decode_tokens([101, 2023])");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_normalize_minmax() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(r#"normalize([2.0, 4.0, 6.0, 8.0, 10.0], "minmax")"#)
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[0], 0.0));
+        assert!(approx_eq(vals[4], 1.0));
+        assert!(approx_eq(vals[2], 0.5));
+    }
+
+    #[test]
+    fn test_normalize_l2() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(r#"normalize([3.0, 4.0], "l2")"#)
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[0], 0.6));
+        assert!(approx_eq(vals[1], 0.8));
+    }
+
+    #[test]
+    fn test_standardize() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("standardize([10.0, 20.0, 30.0], 20.0, 10.0)")
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[0], -1.0));
+        assert!(approx_eq(vals[1], 0.0));
+        assert!(approx_eq(vals[2], 1.0));
+    }
+
+    #[test]
+    fn test_one_hot() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("one_hot(2, 4)")
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert_eq!(vals, vec![0.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn test_label_encode() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<i64>(r#"let m = #{"cat": 0, "dog": 1, "bird": 2}; label_encode("dog", m)"#)
+            .unwrap();
+        assert_eq!(result, 1);
+
+        let unknown = engine
+            .eval::<i64>(r#"let m = #{"cat": 0}; label_encode("fish", m)"#)
+            .unwrap();
+        assert_eq!(unknown, -1);
+    }
+
+    #[test]
+    fn test_fill_missing_zero() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(r#"fill_missing([1.0, 0.0/0.0, 3.0], "zero")"#)
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[0], 1.0));
+        assert!(approx_eq(vals[1], 0.0));
+        assert!(approx_eq(vals[2], 3.0));
+    }
+
+    #[test]
+    fn test_fill_missing_mean() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(r#"fill_missing([2.0, 0.0/0.0, 4.0], "mean")"#)
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[1], 3.0));
+    }
+
+    #[test]
+    fn test_fill_missing_median() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(r#"fill_missing([1.0, 0.0/0.0, 5.0, 3.0], "median")"#)
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[1], 3.0));
+    }
+
+    #[test]
+    fn test_decode_image() {
+        let engine = make_engine();
+        use image::{ImageBuffer, Rgb};
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(2, 2, |x, y| {
+                if x == 0 && y == 0 {
+                    Rgb([255, 0, 0])
+                } else {
+                    Rgb([0, 0, 0])
+                }
+            });
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        use base64::Engine as B64Engine;
+        let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+
+        let script = format!(r#"decode_image("{b64}")"#);
+        let result = engine.eval::<rhai::Map>(&script).unwrap();
+        assert_eq!(result.get("width").unwrap().as_int().unwrap(), 2);
+        assert_eq!(result.get("height").unwrap().as_int().unwrap(), 2);
+        assert_eq!(result.get("channels").unwrap().as_int().unwrap(), 3);
+        let pixels = result.get("pixels").unwrap().clone().into_typed_array::<Dynamic>().unwrap();
+        assert_eq!(pixels.len(), 12);
+        assert!(approx_eq(to_f64(&pixels[0]), 255.0));
+        assert!(approx_eq(to_f64(&pixels[1]), 0.0));
+    }
+
+    #[test]
+    fn test_resize_image() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(
+                "resize_image([255.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2, 2, 1, 1, 3)",
+            )
+            .unwrap();
+        assert_eq!(result.len(), 3);
+    }
+
+    #[test]
+    fn test_normalize_image() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(
+                "normalize_image([100.0, 150.0, 200.0, 100.0, 150.0, 200.0], [100.0, 100.0, 100.0], [50.0, 50.0, 50.0])",
+            )
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[0], 0.0));
+        assert!(approx_eq(vals[1], 1.0));
+        assert!(approx_eq(vals[2], 2.0));
+    }
+
+    #[test]
+    fn test_image_to_chw() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(
+                "image_to_chw([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 1, 2, 3)",
+            )
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert_eq!(vals, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);
+    }
+
+    #[test]
+    fn test_center_crop() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(
+                "center_crop([\
+                    1.0, 2.0, 3.0,  4.0, 5.0, 6.0,  7.0, 8.0, 9.0,\
+                    10.0,11.0,12.0, 13.0,14.0,15.0, 16.0,17.0,18.0,\
+                    19.0,20.0,21.0, 22.0,23.0,24.0, 25.0,26.0,27.0\
+                ], 3, 3, 1, 1, 3)",
+            )
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert_eq!(vals, vec![13.0, 14.0, 15.0]);
+    }
+
+    #[test]
+    fn test_grayscale() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("grayscale([255.0, 0.0, 0.0, 0.0, 255.0, 0.0], 1, 2)")
+            .unwrap();
+        let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
+        assert!(approx_eq(vals[0], 0.2989 * 255.0));
+        assert!(approx_eq(vals[1], 0.5870 * 255.0));
+    }
+
+    #[test]
+    fn test_nms() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>(
+                r#"nms(
+                    [[0.0, 0.0, 10.0, 10.0], [1.0, 1.0, 11.0, 11.0], [50.0, 50.0, 60.0, 60.0]],
+                    [0.9, 0.8, 0.7],
+                    0.5
+                )"#,
+            )
+            .unwrap();
+        let vals: Vec<i64> = result.iter().map(|v| v.as_int().unwrap()).collect();
+        assert_eq!(vals[0], 0);
+        assert!(vals.contains(&2));
+        assert!(!vals.contains(&1));
+    }
+}
+
 fn compute_iou(a: &[f64; 4], b: &[f64; 4]) -> f64 {
     let x1 = a[0].max(b[0]);
     let y1 = a[1].max(b[1]);
