@@ -23,7 +23,7 @@ pub fn register_all(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tokenizer
 
 fn register_math_functions(engine: &mut Engine) {
     engine.register_fn("softmax", |arr: rhai::Array| -> rhai::Array {
-        let values: Vec<f64> = arr.iter().map(|v| to_f64(v)).collect();
+        let values: Vec<f64> = arr.iter().map(to_f64).collect();
         let max_val = values.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
         let exps: Vec<f64> = values.iter().map(|&v| (v - max_val).exp()).collect();
         let sum: f64 = exps.iter().sum();
@@ -81,16 +81,11 @@ fn register_math_functions(engine: &mut Engine) {
             .collect()
     });
 
-    engine.register_fn(
-        "threshold",
-        |arr: rhai::Array, val: f64| -> rhai::Array {
-            arr.iter()
-                .map(|v| {
-                    Dynamic::from(if to_f64(v) >= val { 1.0_f64 } else { 0.0_f64 })
-                })
-                .collect()
-        },
-    );
+    engine.register_fn("threshold", |arr: rhai::Array, val: f64| -> rhai::Array {
+        arr.iter()
+            .map(|v| Dynamic::from(if to_f64(v) >= val { 1.0_f64 } else { 0.0_f64 }))
+            .collect()
+    });
 
     engine.register_fn(
         "clip",
@@ -117,9 +112,7 @@ fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tok
         },
     );
 
-    engine.register_fn("text_lower", |text: &str| -> String {
-        text.to_lowercase()
-    });
+    engine.register_fn("text_lower", |text: &str| -> String { text.to_lowercase() });
 
     engine.register_fn(
         "regex_replace",
@@ -128,7 +121,7 @@ fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tok
          replacement: &str|
          -> Result<String, Box<rhai::EvalAltResult>> {
             let re = regex::Regex::new(pattern)
-                .map_err(|e| format!("invalid regex '{}': {e}", pattern))?;
+                .map_err(|e| format!("invalid regex '{pattern}': {e}"))?;
             Ok(re.replace_all(text, replacement).to_string())
         },
     );
@@ -140,10 +133,7 @@ fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tok
             let t = tok
                 .as_ref()
                 .ok_or_else(|| "tokenizer.json not loaded".to_string())?;
-            let token_ids: Vec<u32> = ids
-                .iter()
-                .map(|v| v.as_int().unwrap_or(0) as u32)
-                .collect();
+            let token_ids: Vec<u32> = ids.iter().map(|v| v.as_int().unwrap_or(0) as u32).collect();
             t.decode(&token_ids, true)
                 .map_err(|e| format!("decode failed: {e}").into())
         },
@@ -154,7 +144,7 @@ fn register_tabular_functions(engine: &mut Engine) {
     engine.register_fn(
         "normalize",
         |arr: rhai::Array, method: &str| -> rhai::Array {
-            let values: Vec<f64> = arr.iter().map(|v| to_f64(v)).collect();
+            let values: Vec<f64> = arr.iter().map(to_f64).collect();
             match method {
                 "minmax" => {
                     let min = values.iter().cloned().fold(f64::INFINITY, f64::min);
@@ -174,10 +164,7 @@ fn register_tabular_functions(engine: &mut Engine) {
                     if norm == 0.0 {
                         values.iter().map(|_| Dynamic::from(0.0_f64)).collect()
                     } else {
-                        values
-                            .iter()
-                            .map(|&v| Dynamic::from(v / norm))
-                            .collect()
+                        values.iter().map(|&v| Dynamic::from(v / norm)).collect()
                     }
                 }
                 _ => arr,
@@ -201,29 +188,23 @@ fn register_tabular_functions(engine: &mut Engine) {
         },
     );
 
-    engine.register_fn(
-        "one_hot",
-        |index: i64, num_classes: i64| -> rhai::Array {
-            (0..num_classes)
-                .map(|i| Dynamic::from(if i == index { 1.0_f64 } else { 0.0_f64 }))
-                .collect()
-        },
-    );
+    engine.register_fn("one_hot", |index: i64, num_classes: i64| -> rhai::Array {
+        (0..num_classes)
+            .map(|i| Dynamic::from(if i == index { 1.0_f64 } else { 0.0_f64 }))
+            .collect()
+    });
 
-    engine.register_fn(
-        "label_encode",
-        |value: &str, mapping: rhai::Map| -> i64 {
-            mapping
-                .get(value)
-                .and_then(|v| v.as_int().ok())
-                .unwrap_or(-1)
-        },
-    );
+    engine.register_fn("label_encode", |value: &str, mapping: rhai::Map| -> i64 {
+        mapping
+            .get(value)
+            .and_then(|v| v.as_int().ok())
+            .unwrap_or(-1)
+    });
 
     engine.register_fn(
         "fill_missing",
         |arr: rhai::Array, strategy: &str| -> rhai::Array {
-            let values: Vec<f64> = arr.iter().map(|v| to_f64(v)).collect();
+            let values: Vec<f64> = arr.iter().map(to_f64).collect();
             let valid: Vec<f64> = values.iter().filter(|v| !v.is_nan()).cloned().collect();
             let fill_val = match strategy {
                 "zero" => 0.0,
@@ -239,9 +220,8 @@ fn register_tabular_functions(engine: &mut Engine) {
                         0.0
                     } else {
                         let mut sorted = valid.clone();
-                        sorted.sort_by(|a, b| {
-                            a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal)
-                        });
+                        sorted
+                            .sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
                         let mid = sorted.len() / 2;
                         if sorted.len() % 2 == 0 {
                             (sorted[mid - 1] + sorted[mid]) / 2.0
@@ -268,8 +248,8 @@ fn register_cv_functions(engine: &mut Engine) {
             let bytes = base64::engine::general_purpose::STANDARD
                 .decode(data)
                 .map_err(|e| format!("base64 decode failed: {e}"))?;
-            let img = image::load_from_memory(&bytes)
-                .map_err(|e| format!("image decode failed: {e}"))?;
+            let img =
+                image::load_from_memory(&bytes).map_err(|e| format!("image decode failed: {e}"))?;
             let rgb = img.to_rgb8();
             let (w, h) = rgb.dimensions();
             let pixels: rhai::Array = rgb
@@ -300,7 +280,7 @@ fn register_cv_functions(engine: &mut Engine) {
             let dh = dst_h as usize;
             let dw = dst_w as usize;
             let ch = channels as usize;
-            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let src: Vec<f64> = pixels.iter().map(to_f64).collect();
             let mut dst = vec![0.0f64; dh * dw * ch];
             let scale_y = if dh > 1 {
                 (sh as f64 - 1.0) / (dh as f64 - 1.0)
@@ -334,26 +314,22 @@ fn register_cv_functions(engine: &mut Engine) {
                     }
                 }
             }
-            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+            dst.into_iter().map(Dynamic::from).collect()
         },
     );
 
     engine.register_fn(
         "normalize_image",
         |pixels: rhai::Array, mean: rhai::Array, std: rhai::Array| -> rhai::Array {
-            let mean_vals: Vec<f64> = mean.iter().map(|v| to_f64(v)).collect();
-            let std_vals: Vec<f64> = std.iter().map(|v| to_f64(v)).collect();
+            let mean_vals: Vec<f64> = mean.iter().map(to_f64).collect();
+            let std_vals: Vec<f64> = std.iter().map(to_f64).collect();
             let ch = mean_vals.len();
             pixels
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
                     let c = i % ch;
-                    let s = if std_vals[c] != 0.0 {
-                        std_vals[c]
-                    } else {
-                        1.0
-                    };
+                    let s = if std_vals[c] != 0.0 { std_vals[c] } else { 1.0 };
                     Dynamic::from((to_f64(v) - mean_vals[c]) / s)
                 })
                 .collect()
@@ -366,7 +342,7 @@ fn register_cv_functions(engine: &mut Engine) {
             let height = h as usize;
             let width = w as usize;
             let channels = c as usize;
-            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let src: Vec<f64> = pixels.iter().map(to_f64).collect();
             let mut dst = vec![0.0f64; height * width * channels];
             for y in 0..height {
                 for x in 0..width {
@@ -376,7 +352,7 @@ fn register_cv_functions(engine: &mut Engine) {
                     }
                 }
             }
-            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+            dst.into_iter().map(Dynamic::from).collect()
         },
     );
 
@@ -396,7 +372,7 @@ fn register_cv_functions(engine: &mut Engine) {
             let c = channels as usize;
             let start_y = (sh.saturating_sub(ch_val)) / 2;
             let start_x = (sw.saturating_sub(cw)) / 2;
-            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let src: Vec<f64> = pixels.iter().map(to_f64).collect();
             let mut dst = Vec::with_capacity(ch_val * cw * c);
             for y in 0..ch_val {
                 for x in 0..cw {
@@ -407,7 +383,7 @@ fn register_cv_functions(engine: &mut Engine) {
                     }
                 }
             }
-            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+            dst.into_iter().map(Dynamic::from).collect()
         },
     );
 
@@ -416,7 +392,7 @@ fn register_cv_functions(engine: &mut Engine) {
         |pixels: rhai::Array, h: i64, w: i64| -> rhai::Array {
             let height = h as usize;
             let width = w as usize;
-            let src: Vec<f64> = pixels.iter().map(|v| to_f64(v)).collect();
+            let src: Vec<f64> = pixels.iter().map(to_f64).collect();
             let mut dst = Vec::with_capacity(height * width);
             for i in 0..(height * width) {
                 let r = src[i * 3];
@@ -424,18 +400,15 @@ fn register_cv_functions(engine: &mut Engine) {
                 let b = src[i * 3 + 2];
                 dst.push(0.2989 * r + 0.5870 * g + 0.1140 * b);
             }
-            dst.into_iter().map(|v| Dynamic::from(v)).collect()
+            dst.into_iter().map(Dynamic::from).collect()
         },
     );
 
     engine.register_fn(
         "nms",
-        |boxes: rhai::Array,
-         scores: rhai::Array,
-         iou_threshold: f64|
-         -> rhai::Array {
+        |boxes: rhai::Array, scores: rhai::Array, iou_threshold: f64| -> rhai::Array {
             let n = scores.len();
-            let sc: Vec<f64> = scores.iter().map(|v| to_f64(v)).collect();
+            let sc: Vec<f64> = scores.iter().map(to_f64).collect();
             let bx: Vec<[f64; 4]> = boxes
                 .iter()
                 .map(|v| {
@@ -450,7 +423,9 @@ fn register_cv_functions(engine: &mut Engine) {
 
             let mut indices: Vec<usize> = (0..n).collect();
             indices.sort_by(|&a, &b| {
-                sc[b].partial_cmp(&sc[a]).unwrap_or(std::cmp::Ordering::Equal)
+                sc[b]
+                    .partial_cmp(&sc[a])
+                    .unwrap_or(std::cmp::Ordering::Equal)
             });
 
             let mut keep: Vec<i64> = Vec::new();
@@ -471,7 +446,7 @@ fn register_cv_functions(engine: &mut Engine) {
                     }
                 }
             }
-            keep.into_iter().map(|v| Dynamic::from(v)).collect()
+            keep.into_iter().map(Dynamic::from).collect()
         },
     );
 }
@@ -507,9 +482,7 @@ mod tests {
     #[test]
     fn test_softmax_integers() {
         let engine = make_engine();
-        let result = engine
-            .eval::<rhai::Array>("softmax([1, 2, 3])")
-            .unwrap();
+        let result = engine.eval::<rhai::Array>("softmax([1, 2, 3])").unwrap();
         let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
         assert!(approx_eq(vals.iter().sum::<f64>(), 1.0));
     }
@@ -517,9 +490,7 @@ mod tests {
     #[test]
     fn test_sigmoid() {
         let engine = make_engine();
-        let result = engine
-            .eval::<rhai::Array>("sigmoid([0.0])")
-            .unwrap();
+        let result = engine.eval::<rhai::Array>("sigmoid([0.0])").unwrap();
         assert!(approx_eq(result[0].as_float().unwrap(), 0.5));
 
         let result2 = engine
@@ -553,7 +524,10 @@ mod tests {
         let first = result[0].clone().cast::<rhai::Map>();
         let second = result[1].clone().cast::<rhai::Map>();
         assert_eq!(first.get("index").unwrap().as_int().unwrap(), 1);
-        assert!(approx_eq(first.get("value").unwrap().as_float().unwrap(), 5.0));
+        assert!(approx_eq(
+            first.get("value").unwrap().as_float().unwrap(),
+            5.0
+        ));
         assert_eq!(second.get("index").unwrap().as_int().unwrap(), 3);
     }
 
@@ -660,9 +634,7 @@ mod tests {
     #[test]
     fn test_one_hot() {
         let engine = make_engine();
-        let result = engine
-            .eval::<rhai::Array>("one_hot(2, 4)")
-            .unwrap();
+        let result = engine.eval::<rhai::Array>("one_hot(2, 4)").unwrap();
         let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
         assert_eq!(vals, vec![0.0, 0.0, 1.0, 0.0]);
     }
@@ -717,14 +689,13 @@ mod tests {
     fn test_decode_image() {
         let engine = make_engine();
         use image::{ImageBuffer, Rgb};
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-            ImageBuffer::from_fn(2, 2, |x, y| {
-                if x == 0 && y == 0 {
-                    Rgb([255, 0, 0])
-                } else {
-                    Rgb([0, 0, 0])
-                }
-            });
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(2, 2, |x, y| {
+            if x == 0 && y == 0 {
+                Rgb([255, 0, 0])
+            } else {
+                Rgb([0, 0, 0])
+            }
+        });
         let mut buf = std::io::Cursor::new(Vec::new());
         img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
         use base64::Engine as B64Engine;
@@ -735,7 +706,12 @@ mod tests {
         assert_eq!(result.get("width").unwrap().as_int().unwrap(), 2);
         assert_eq!(result.get("height").unwrap().as_int().unwrap(), 2);
         assert_eq!(result.get("channels").unwrap().as_int().unwrap(), 3);
-        let pixels = result.get("pixels").unwrap().clone().into_typed_array::<Dynamic>().unwrap();
+        let pixels = result
+            .get("pixels")
+            .unwrap()
+            .clone()
+            .into_typed_array::<Dynamic>()
+            .unwrap();
         assert_eq!(pixels.len(), 12);
         assert!(approx_eq(to_f64(&pixels[0]), 255.0));
         assert!(approx_eq(to_f64(&pixels[1]), 0.0));
@@ -770,9 +746,7 @@ mod tests {
     fn test_image_to_chw() {
         let engine = make_engine();
         let result = engine
-            .eval::<rhai::Array>(
-                "image_to_chw([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 1, 2, 3)",
-            )
+            .eval::<rhai::Array>("image_to_chw([1.0, 2.0, 3.0, 4.0, 5.0, 6.0], 1, 2, 3)")
             .unwrap();
         let vals: Vec<f64> = result.iter().map(|v| v.as_float().unwrap()).collect();
         assert_eq!(vals, vec![1.0, 4.0, 2.0, 5.0, 3.0, 6.0]);

@@ -287,8 +287,7 @@ impl RhaiRunner {
                 let encoding = tokenizer
                     .encode(text, true)
                     .map_err(|e| format!("tokenization failed: {e}"))?;
-                let ids: Vec<i64> =
-                    encoding.get_ids().iter().map(|&id| id as i64).collect();
+                let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
                 let mask: Vec<i64> = encoding
                     .get_attention_mask()
                     .iter()
