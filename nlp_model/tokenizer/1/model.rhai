@@ -1,6 +1,7 @@
 fn execute(inputs) {
     let text_tensor = inputs.get("text");
-    let text = text_lower(text_tensor.as_string());
+    let text = text_tensor.as_string();
+    let clean = regex_replace(text, "\\s+", " ");
 
     let lines = read_lines("vocab.txt");
     let vocab = #{};
@@ -14,36 +15,33 @@ fn execute(inputs) {
     let sep = if "[SEP]" in vocab { vocab["[SEP]"] } else { 0 };
     let unk = if "[UNK]" in vocab { vocab["[UNK]"] } else { 0 };
 
-    let words = split_words(text);
+    let words = split_words(clean);
 
     let input_ids = [];
     input_ids.push(cls);
 
     for word in words {
         if word == "" { continue; }
-        let lower_word = text_lower(word);
-        if lower_word in vocab {
-            input_ids.push(vocab[lower_word]);
+        if word in vocab {
+            input_ids.push(vocab[word]);
         } else {
-            input_ids.push(unk);
+            let lower = text_lower(word);
+            if lower in vocab {
+                input_ids.push(vocab[lower]);
+            } else {
+                input_ids.push(unk);
+            }
         }
     }
 
     input_ids.push(sep);
-
-    let max_len = 128;
-    let input_ids = pad_sequence(input_ids, max_len, 0);
 
     let n = input_ids.len();
     let attention_mask = [];
     let token_type_ids = [];
     let j = 0;
     while j < n {
-        if input_ids[j] != 0 {
-            attention_mask.push(1);
-        } else {
-            attention_mask.push(0);
-        }
+        attention_mask.push(1);
         token_type_ids.push(0);
         j += 1;
     }
