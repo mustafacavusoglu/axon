@@ -13,17 +13,17 @@ fn execute(inputs) {
     while i < seq_len - 2 {
         let pos = i + 1;
         let base = pos * num_labels;
-        let best_label = 0;
-        let best_score = logits[base];
-        let j = 1;
+        let slice = [];
+        let j = 0;
         while j < num_labels {
-            if logits[base + j] > best_score {
-                best_label = j;
-                best_score = logits[base + j];
-            }
+            slice.push(logits[base + j]);
             j += 1;
         }
+
+        let probs = softmax(slice);
+        let best_label = argmax(probs);
         let entity = labels[best_label];
+
         if entity != "O" {
             if output != "" { output += "; "; }
             if i < words.len() {

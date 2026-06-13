@@ -11,6 +11,8 @@ services:
       - "8002:8002"
     volumes:
       - ./ml_model/xgb_housing:/models/xgb_housing:ro
+      - ./ml_model/preprocess_housing:/models/preprocess_housing:ro
+      - ./ml_model/housing_pipeline:/models/housing_pipeline:ro
       - ./nlp_model/tokenizer:/models/tokenizer:ro
       - ./nlp_model/ner_model:/models/ner_model:ro
       - ./nlp_model/decoder:/models/decoder:ro
@@ -24,7 +26,7 @@ services:
       - "--metrics-port=8002"
       - "--log-level=info"
       - "--log-dir=/tmp/logs/axon"
-      - "--log-rotation=7d"
+      - "--log-rotation=1d"
       - "--inference-timeout-ms=30000"
     restart: unless-stopped
 

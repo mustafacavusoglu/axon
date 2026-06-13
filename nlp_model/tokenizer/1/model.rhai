@@ -1,6 +1,6 @@
 fn execute(inputs) {
     let text_tensor = inputs.get("text");
-    let text = text_tensor.as_string();
+    let text = text_lower(text_tensor.as_string());
 
     let lines = read_lines("vocab.txt");
     let vocab = #{};
@@ -21,8 +21,9 @@ fn execute(inputs) {
 
     for word in words {
         if word == "" { continue; }
-        if word in vocab {
-            input_ids.push(vocab[word]);
+        let lower_word = text_lower(word);
+        if lower_word in vocab {
+            input_ids.push(vocab[lower_word]);
         } else {
             input_ids.push(unk);
         }
@@ -30,12 +31,19 @@ fn execute(inputs) {
 
     input_ids.push(sep);
 
+    let max_len = 128;
+    let input_ids = pad_sequence(input_ids, max_len, 0);
+
     let n = input_ids.len();
     let attention_mask = [];
     let token_type_ids = [];
     let j = 0;
     while j < n {
-        attention_mask.push(1);
+        if input_ids[j] != 0 {
+            attention_mask.push(1);
+        } else {
+            attention_mask.push(0);
+        }
         token_type_ids.push(0);
         j += 1;
     }
