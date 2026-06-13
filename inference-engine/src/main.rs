@@ -26,11 +26,30 @@ struct LogGuards {
     _file: tracing_appender::non_blocking::WorkerGuard,
 }
 
+fn parse_rotation(s: &str) -> (tracing_appender::rolling::Rotation, usize) {
+    let s = s.trim();
+    let (num_str, unit) = s.split_at(s.len().saturating_sub(1));
+    let count = num_str.parse::<usize>().unwrap_or(7);
+    let rotation = match unit {
+        "h" => tracing_appender::rolling::Rotation::HOURLY,
+        "d" => tracing_appender::rolling::Rotation::DAILY,
+        _ => tracing_appender::rolling::Rotation::DAILY,
+    };
+    (rotation, count)
+}
+
 fn init_tracing(config: &ServerConfig) -> (Option<SdkTracerProvider>, LogGuards) {
     let log_level: tracing::Level = config.log_level.parse().unwrap_or(tracing::Level::INFO);
+    let (rotation, max_files) = parse_rotation(&config.log_rotation);
 
     std::fs::create_dir_all(&config.log_dir).ok();
-    let file_appender = tracing_appender::rolling::daily(&config.log_dir, "axon-server.json");
+    let file_appender = tracing_appender::rolling::RollingFileAppender::builder()
+        .rotation(rotation)
+        .filename_prefix("axon-server")
+        .filename_suffix("json")
+        .max_log_files(max_files)
+        .build(&config.log_dir)
+        .expect("failed to create log appender");
     let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
     let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
 

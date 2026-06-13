@@ -15,10 +15,18 @@ services:
       - ./nlp_model/ner_model:/models/ner_model:ro
       - ./nlp_model/decoder:/models/decoder:ro
       - ./nlp_model/pipeline:/models/pipeline:ro
+      - axon-logs:/tmp/logs/axon
     command:
       - "--model-repository=/models"
       - "--model-control-mode=poll"
       - "--http-port=8000"
       - "--grpc-port=8001"
       - "--metrics-port=8002"
+      - "--log-level=info"
+      - "--log-dir=/tmp/logs/axon"
+      - "--log-rotation=7d"
+      - "--inference-timeout-ms=30000"
     restart: unless-stopped
+
+volumes:
+  axon-logs:

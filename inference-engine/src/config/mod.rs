@@ -46,7 +46,14 @@ pub struct ServerConfig {
     #[arg(
         long,
         default_value = "/tmp/logs/axon",
-        help = "Log directory for file output (daily rotation)"
+        help = "Log directory for file output"
     )]
     pub log_dir: PathBuf,
+
+    #[arg(
+        long,
+        default_value = "7d",
+        help = "Log rotation: <count><unit> e.g. 7d (daily, keep 7), 24h (hourly, keep 24)"
+    )]
+    pub log_rotation: String,
 }
