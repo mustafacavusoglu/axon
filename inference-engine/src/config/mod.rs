@@ -5,7 +5,7 @@ use clap::Parser;
 #[derive(Parser, Debug, Clone)]
 #[command(
     name = "axon-server",
-    version = "0.2.0",
+    version = "0.3.5",
     about = "Axon Inference Server — CPU ONNX serving"
 )]
 pub struct ServerConfig {
@@ -35,4 +35,18 @@ pub struct ServerConfig {
 
     #[arg(long, default_value_t = 4)]
     pub concurrency_per_model: u32,
+
+    #[arg(
+        long,
+        default_value = "info",
+        help = "Log level: trace, debug, info, warn, error"
+    )]
+    pub log_level: String,
+
+    #[arg(
+        long,
+        default_value = "/tmp/logs/axon",
+        help = "Log directory for file output (daily rotation)"
+    )]
+    pub log_dir: PathBuf,
 }

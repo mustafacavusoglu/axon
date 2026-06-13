@@ -13,12 +13,73 @@ use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
 use tokio::signal;
 use tokio::sync::watch;
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::filter::Targets;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
+use tracing_subscriber::Layer;
 
 use config::ServerConfig;
 use session::pool::SessionPool;
 
-fn init_tracing() -> Option<SdkTracerProvider> {
+struct LogGuards {
+    _stdout: tracing_appender::non_blocking::WorkerGuard,
+    _file: tracing_appender::non_blocking::WorkerGuard,
+}
+
+fn init_tracing(config: &ServerConfig) -> (Option<SdkTracerProvider>, LogGuards) {
+    let log_level: tracing::Level = config.log_level.parse().unwrap_or(tracing::Level::INFO);
+
+    std::fs::create_dir_all(&config.log_dir).ok();
+    let file_appender = tracing_appender::rolling::daily(&config.log_dir, "axon-server.json");
+    let (file_writer, file_guard) = tracing_appender::non_blocking(file_appender);
+    let (stdout_writer, stdout_guard) = tracing_appender::non_blocking(std::io::stdout());
+
+    let console_filter = Targets::new().with_target("axon::console", tracing::Level::INFO);
+
+    let file_filter = Targets::new()
+        .with_default(log_level)
+        .with_target("hyper", tracing::Level::WARN)
+        .with_target("tower", tracing::Level::WARN)
+        .with_target("tonic", tracing::Level::WARN)
+        .with_target("h2", tracing::Level::WARN);
+
+    let stdout_layer = tracing_subscriber::fmt::layer()
+        .with_writer(stdout_writer)
+        .with_target(false)
+        .with_level(false)
+        .compact()
+        .with_filter(console_filter);
+
+    let file_layer = tracing_subscriber::fmt::layer()
+        .with_writer(file_writer)
+        .json()
+        .with_current_span(true)
+        .with_filter(file_filter);
+
+    let otel_provider = init_otel();
+    if let Some(ref provider) = otel_provider {
+        let tracer = provider.tracer("axon-server");
+        let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
+        tracing_subscriber::registry()
+            .with(stdout_layer)
+            .with(file_layer)
+            .with(otel_layer)
+            .init();
+    } else {
+        tracing_subscriber::registry()
+            .with(stdout_layer)
+            .with(file_layer)
+            .init();
+    }
+
+    let guards = LogGuards {
+        _stdout: stdout_guard,
+        _file: file_guard,
+    };
+    (otel_provider, guards)
+}
+
+fn init_otel() -> Option<SdkTracerProvider> {
     let endpoint = std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
         .or_else(|_| std::env::var("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT"))
         .ok()?;
@@ -34,38 +95,84 @@ fn init_tracing() -> Option<SdkTracerProvider> {
         .with_batch_exporter(exporter)
         .build();
 
-    let tracer = provider.tracer("axon-server");
     opentelemetry::global::set_tracer_provider(provider.clone());
-
-    let otel_layer = tracing_opentelemetry::layer().with_tracer(tracer);
-
-    tracing_subscriber::registry()
-        .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-        .with(
-            tracing_subscriber::fmt::layer()
-                .json()
-                .with_current_span(true),
-        )
-        .with(otel_layer)
-        .init();
-
     Some(provider)
+}
+
+fn print_startup_table(config: &ServerConfig, pool: &SessionPool) {
+    let version = env!("CARGO_PKG_VERSION");
+    let models = pool.list_models();
+    let width = 62;
+
+    println!();
+    println!("  ╔{}╗", "═".repeat(width));
+    println!(
+        "  ║{:^width$}║",
+        format!("axon-server v{version}"),
+        width = width
+    );
+    println!("  ╠{}╣", "═".repeat(width));
+    println!("  ║{:<width$}║", "  Endpoints", width = width);
+    println!(
+        "  ║{:<width$}║",
+        format!("    HTTP     http://0.0.0.0:{}", config.http_port),
+        width = width
+    );
+    println!(
+        "  ║{:<width$}║",
+        format!("    gRPC     0.0.0.0:{}", config.grpc_port),
+        width = width
+    );
+    println!(
+        "  ║{:<width$}║",
+        format!(
+            "    Metrics  http://0.0.0.0:{}/metrics",
+            config.metrics_port
+        ),
+        width = width
+    );
+    println!(
+        "  ║{:<width$}║",
+        format!("    Logs     {}", config.log_dir.display()),
+        width = width
+    );
+    println!("  ╠{}╣", "═".repeat(width));
+    println!("  ║{:<width$}║", "  Models", width = width);
+    println!(
+        "  ║{:<width$}║",
+        "    Name                     Ver  Platform     Status",
+        width = width
+    );
+    println!(
+        "  ║{:<width$}║",
+        "    ─────────────────────────────────────────────────────",
+        width = width
+    );
+
+    if models.is_empty() {
+        println!("  ║{:<width$}║", "    (no models loaded)", width = width);
+    } else {
+        let mut sorted = models;
+        sorted.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+        for (name, version, _state) in &sorted {
+            let session = pool.get(name, *version);
+            let platform = session
+                .as_ref()
+                .map(|s| s.runner.platform_name())
+                .unwrap_or("unknown");
+            let status = "READY";
+            let line = format!("    {name:<25} {version:<4} {platform:<12} {status}");
+            println!("  ║{line:<width$}║");
+        }
+    }
+
+    println!("  ╚{}╝", "═".repeat(width));
+    println!();
 }
 
 fn main() -> anyhow::Result<()> {
     let config = ServerConfig::parse();
-
-    let provider = init_tracing();
-    if provider.is_none() {
-        tracing_subscriber::registry()
-            .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .json()
-                    .with_current_span(true),
-            )
-            .init();
-    }
+    let (provider, _guards) = init_tracing(&config);
 
     let inference_threads = if config.num_threads > 0 {
         config.num_threads
@@ -73,9 +180,7 @@ fn main() -> anyhow::Result<()> {
         num_cpus::get_physical()
     };
 
-    // Tokio handles async IO only — needs far fewer threads than inference
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
-
     let pool = SessionPool::new(inference_threads)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -87,19 +192,16 @@ fn main() -> anyhow::Result<()> {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
         tracing::info!(
-            model_repository = %config.model_repository.display(),
-            http_port = config.http_port,
-            grpc_port = config.grpc_port,
-            metrics_port = config.metrics_port,
-            model_control_mode = %config.model_control_mode,
-            inference_threads = inference_threads,
-            tokio_threads = tokio_threads,
-            "starting axon-server"
+            target: "axon::console",
+            "loading models from {}",
+            config.model_repository.display()
         );
 
         metrics::init();
         model_repository::load_all_models(&config.model_repository, &pool).await;
         metrics::set_models_count(pool.model_count() as i64);
+
+        print_startup_table(&config, &pool);
 
         let poll_handle = if config.model_control_mode == "poll" {
             let poll_pool = pool.clone();
@@ -148,7 +250,7 @@ fn main() -> anyhow::Result<()> {
         };
 
         signal::ctrl_c().await.ok();
-        tracing::info!("shutdown signal received, draining...");
+        tracing::info!(target: "axon::console", "shutdown signal received, draining...");
         let _ = shutdown_tx.send(true);
 
         if let Some(h) = poll_handle {
@@ -158,7 +260,7 @@ fn main() -> anyhow::Result<()> {
         let _ = tokio::time::timeout(Duration::from_secs(30), grpc_handle).await;
         let _ = tokio::time::timeout(Duration::from_secs(5), metrics_handle).await;
 
-        tracing::info!("axon-server stopped");
+        tracing::info!(target: "axon::console", "axon-server stopped");
     });
 
     if let Some(p) = provider {

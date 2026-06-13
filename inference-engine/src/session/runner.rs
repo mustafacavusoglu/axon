@@ -41,6 +41,14 @@ impl ModelRunner {
         Ok(ModelRunner::Ensemble(Arc::new(runner)))
     }
 
+    pub fn platform_name(&self) -> &'static str {
+        match self {
+            ModelRunner::Onnx(_) => "onnxruntime",
+            ModelRunner::Rhai(_) => "script",
+            ModelRunner::Ensemble(_) => "ensemble",
+        }
+    }
+
     pub fn concurrency_semaphore(&self) -> &Arc<Semaphore> {
         match self {
             ModelRunner::Onnx(r) => r.concurrency_semaphore(),

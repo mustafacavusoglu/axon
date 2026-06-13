@@ -167,6 +167,9 @@ impl GrpcInferenceService for KfsService {
             Status::not_found(format!("model '{}' not found or not ready", req.model_name))
         })?;
 
+        let request_start = Instant::now();
+        tracing::debug!(model = %req.model_name, "grpc inference request received");
+
         let queue_start = Instant::now();
         let _permit = session.concurrency().acquire().await.map_err(|_| {
             metrics::record_request(&req.model_name, "503");
@@ -207,9 +210,11 @@ impl GrpcInferenceService for KfsService {
         };
 
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+        let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
         metrics::dec_inflight(&req.model_name);
         metrics::record_request(&req.model_name, "200");
         metrics::record_latency(&req.model_name, latency_ms);
+        tracing::info!(model = %req.model_name, latency_ms = format!("{latency_ms:.2}"), total_ms = format!("{total_ms:.2}"), "inference completed");
 
         let response_outputs: Vec<InferOutput> = outputs
             .into_iter()

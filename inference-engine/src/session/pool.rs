@@ -85,7 +85,7 @@ impl SessionPool {
         });
 
         self.sessions.insert(key, session.clone());
-        tracing::info!(name, version, instances = count, "model loaded");
+        tracing::info!(target: "axon::console", name, version, instances = count, "model loaded");
         Ok(session)
     }
 
@@ -124,7 +124,7 @@ impl SessionPool {
         });
 
         self.sessions.insert(key, session.clone());
-        tracing::info!(name, version, instances = count, "script model loaded");
+        tracing::info!(target: "axon::console", name, version, instances = count, "script model loaded");
         Ok(session)
     }
 
@@ -159,7 +159,7 @@ impl SessionPool {
         });
 
         self.sessions.insert(key, session.clone());
-        tracing::info!(name, version, instances = count, "ensemble model loaded");
+        tracing::info!(target: "axon::console", name, version, instances = count, "ensemble model loaded");
         Ok(session)
     }
 

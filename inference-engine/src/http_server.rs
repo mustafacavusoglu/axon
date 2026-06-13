@@ -295,6 +295,9 @@ async fn run_inference(
     model_name: String,
     req: InferRequest,
 ) -> Result<impl IntoResponse, StatusCode> {
+    let request_start = Instant::now();
+    tracing::debug!(model = %model_name, "inference request received");
+
     let queue_start = Instant::now();
     let _permit = session.concurrency().acquire().await.map_err(|e| {
         tracing::warn!(error = %e, "concurrency limit reached");
@@ -338,9 +341,11 @@ async fn run_inference(
     };
 
     let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
+    let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
     metrics::dec_inflight(&model_name);
     metrics::record_request(&model_name, "200");
     metrics::record_latency(&model_name, latency_ms);
+    tracing::info!(model = %model_name, latency_ms = format!("{latency_ms:.2}"), total_ms = format!("{total_ms:.2}"), "inference completed");
 
     let response_outputs: Vec<InferOutputResponse> = outputs
         .into_iter()
