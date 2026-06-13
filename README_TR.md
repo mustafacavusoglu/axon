@@ -8,6 +8,21 @@ Tek binary, Triton uyumlu, CPU öncelikli model sunum sistemi.
 
 ---
 
+## Özellikler
+
+- **KServe v2 API** — HTTP + gRPC, tam model yönetimi
+- **Ensemble Pipeline** — Config ile declarative çok-model zincirleme
+- **BLS (Rhai Scripting)** — Özel pre/post processing mantığı
+- **23 Builtin Fonksiyon** — ML, NLP, CV, tabular preprocessing/postprocessing
+- **HuggingFace Tokenizer** — Native tokenizer.json desteği
+- **Yapısal Loglama** — JSON dosya (günlük rotation) + OTEL + filtrelenmiş stdout
+- **Inference Timeout** — Sunucu bazında ayarlanabilir timeout
+- **Circuit Breaker** — Yüklenemeyen modelleri otomatik atlama
+- **Prometheus Metrikleri** — Gecikme, throughput, inflight, kuyruk bekleme
+- **Docker Multi-arch** — linux/amd64 + linux/arm64
+
+---
+
 ## Hızlı Başlangıç
 
 ### 1. Gereksinimler
@@ -36,7 +51,6 @@ cargo build --release
 
 ### 3. Örnek modelle çalıştır
 ```bash
-# Sunucuyu ML modeliyle başlat
 ./target/release/axon-server \
   --model-repository=../ml_model \
   --model-control-mode=poll
@@ -68,17 +82,111 @@ docker run -v ./models:/models -p 8000:8000 -p 8001:8001 -p 8002:8002 \
 
 ---
 
+## CLI Referansı
+
+| Parametre | Varsayılan | Açıklama |
+|-----------|-----------|----------|
+| `--model-repository` | `/models` | Model deposu yolu |
+| `--model-control-mode` | `none` | `none` veya `poll` (otomatik yeniden yükleme) |
+| `--repository-poll-secs` | `30` | Tarama aralığı (saniye) |
+| `--http-port` | `8000` | HTTP REST portu |
+| `--grpc-port` | `8001` | gRPC portu |
+| `--metrics-port` | `8002` | Prometheus metrik portu |
+| `--inference-timeout-ms` | `30000` | Maks inference süresi (504 döner) |
+| `--num-threads` | `0` | Inference thread sayısı (0 = otomatik) |
+| `--concurrency-per-model` | `4` | Model başına maks eşzamanlı istek |
+| `--log-level` | `info` | Log seviyesi: trace, debug, info, warn, error |
+| `--log-dir` | `/tmp/logs/axon` | Log dizini (JSON, günlük rotation) |
+
+---
+
+## Builtin Fonksiyonlar (Rhai BLS)
+
+Tüm Rhai scriptlerinde kullanılabilir 23 hazır fonksiyon:
+
+### ML / Matematik
+| Fonksiyon | İmza | Açıklama |
+|-----------|------|----------|
+| `softmax` | `(arr) → arr` | Logit → olasılık dönüşümü |
+| `sigmoid` | `(arr) → arr` | Sigmoid aktivasyon |
+| `argmax` | `(arr) → int` | Maks değerin indeksi |
+| `argmin` | `(arr) → int` | Min değerin indeksi |
+| `topk` | `(arr, k) → arr` | Top-K değer ve indeksler |
+| `threshold` | `(arr, val) → arr` | Binary eşikleme |
+| `clip` | `(arr, min, max) → arr` | Değerleri aralığa sınırla |
+
+### NLP
+| Fonksiyon | İmza | Açıklama |
+|-----------|------|----------|
+| `tokenize` | `(text) → map` | HuggingFace tokenizer (tokenizer.json gerekli) |
+| `decode_tokens` | `(ids) → string` | Token ID'lerini metne çevir |
+| `pad_sequence` | `(arr, len, pad) → arr` | Sabit uzunluğa padding/truncation |
+| `text_lower` | `(text) → string` | Küçük harfe çevirme |
+| `regex_replace` | `(text, pattern, repl) → string` | Regex metin değiştirme |
+
+### Tabular / Normalizasyon
+| Fonksiyon | İmza | Açıklama |
+|-----------|------|----------|
+| `normalize` | `(arr, method) → arr` | "minmax" veya "l2" normalizasyon |
+| `standardize` | `(arr, mean, std) → arr` | Z-score standardizasyon |
+| `one_hot` | `(index, n) → arr` | One-hot encoding |
+| `label_encode` | `(value, map) → int` | Kategorik → sayısal |
+| `fill_missing` | `(arr, strategy) → arr` | NaN doldurma: "zero", "mean", "median" |
+
+### Bilgisayar Görüsü (CV)
+| Fonksiyon | İmza | Açıklama |
+|-----------|------|----------|
+| `decode_image` | `(base64) → map` | JPEG/PNG decode → piksel array |
+| `resize_image` | `(pixels, sh, sw, dh, dw, c) → arr` | Bilinear boyut değiştirme |
+| `normalize_image` | `(pixels, mean, std) → arr` | Kanal bazlı normalizasyon |
+| `image_to_chw` | `(pixels, h, w, c) → arr` | HWC → CHW layout dönüşümü |
+| `center_crop` | `(pixels, sh, sw, ch, cw, c) → arr` | Merkez kırpma |
+| `grayscale` | `(pixels, h, w) → arr` | RGB → gri tonlama |
+| `nms` | `(boxes, scores, iou) → arr` | Non-Maximum Suppression |
+
+### Örnek: Sentiment Analizi Decoder
+```rhai
+fn execute(inputs) {
+    let logits = inputs.get("logits").as_f64();
+    let probs = softmax(logits);
+    let label = argmax(probs);
+
+    return #{
+        "label": create_tensor_i64("label", [1], [label]),
+        "probs": create_tensor_f64("probs", [3], probs),
+    };
+}
+```
+
+---
+
+## Loglama
+
+Üç katmanlı loglama mimarisi, tamamı non-blocking:
+
+| Katman | Çıktı | İçerik |
+|--------|-------|--------|
+| **stdout** | Terminal | Sadece model yükleme, health, başlangıç tablosu |
+| **file** | `/tmp/logs/axon/axon-server.YYYY-MM-DD.json` | Her şey (JSON, günlük rotation) |
+| **OTEL** | OTLP endpoint | Her şey (`OTEL_EXPORTER_OTLP_ENDPOINT` set ise) |
+
+Inference tracing logları her istek için `model`, `latency_ms`, `total_ms` içerir.
+
+---
+
 ## Dokümantasyon
 
-Detaylı dökümantasyon **[Wiki](https://github.com/mustafacavusoglu/axon/wiki)** sayfasında:
+Detaylı dokümantasyon **[Wiki](https://github.com/mustafacavusoglu/axon/wiki)** sayfasında:
 
 | Rehber | Açıklama |
 |--------|----------|
 | [Config Referansı](https://github.com/mustafacavusoglu/axon/wiki/Config-Reference) | YAML & pbtxt config formatı |
 | [BLS / Scripting](https://github.com/mustafacavusoglu/axon/wiki/BLS-Scripting) | Rhai scripting engine |
+| [Builtin Fonksiyonlar](https://github.com/mustafacavusoglu/axon/wiki/Builtin-Functions) | 23 preprocessing/postprocessing fonksiyon |
 | [Ensemble Pipeline](https://github.com/mustafacavusoglu/axon/wiki/Ensemble-Pipeline) | Declarative model zincirleme |
+| [Loglama](https://github.com/mustafacavusoglu/axon/wiki/Logging) | Yapısal loglama & OTEL |
 | [Deployment](https://github.com/mustafacavusoglu/axon/wiki/Deployment) | CLI, Docker, Compose |
-| [Metrics](https://github.com/mustafacavusoglu/axon/wiki/Metrics) | Prometheus metrikleri |
+| [Metrikler](https://github.com/mustafacavusoglu/axon/wiki/Metrics) | Prometheus metrikleri |
 
 ---
 
@@ -90,7 +198,7 @@ Detaylı dökümantasyon **[Wiki](https://github.com/mustafacavusoglu/axon/wiki)
 | `nlp_model/` | `tokenizer`, `ner_model`, `decoder`, `pipeline` | BLS + Ensemble NLP pipeline |
 
 ```bash
-# NLP ensemble — metinden entity etiketlerine (script yok)
+# NLP ensemble — metinden entity etiketlerine
 curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
   -H 'Content-Type: application/json' \
   -d '{"inputs":[{"name":"raw_text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
@@ -109,5 +217,5 @@ curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
 - Rate limiting middleware
 - Model A/B traffic splitting
 - LRU eviction — bellek baskısında en az kullanılan modeli kaldırma
-- Swagger UI — OpenAPI 3.0 tarayıcı tabanlı dökümantasyon
+- Swagger UI — OpenAPI 3.0 tarayıcı tabanlı dokümantasyon
 - NUMA-aware session pools — çok soketli sunucu optimizasyonu

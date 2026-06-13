@@ -8,6 +8,21 @@ Single-binary, Triton-compatible, CPU-first model serving.
 
 ---
 
+## Features
+
+- **KServe v2 API** — HTTP + gRPC, full model management
+- **Ensemble Pipelines** — Declarative multi-model chaining via config
+- **BLS (Rhai Scripting)** — Custom pre/post processing logic
+- **23 Builtin Functions** — ML, NLP, CV, tabular preprocessing/postprocessing
+- **HuggingFace Tokenizer** — Native tokenizer.json support
+- **Structured Logging** — JSON file (daily rotation) + OTEL + filtered stdout
+- **Inference Timeout** — Configurable per-server timeout
+- **Circuit Breaker** — Auto-skip models that fail to load
+- **Prometheus Metrics** — Latency, throughput, inflight, queue wait
+- **Docker Multi-arch** — linux/amd64 + linux/arm64
+
+---
+
 ## Quick Start
 
 ### 1. Prerequisites
@@ -36,7 +51,6 @@ cargo build --release
 
 ### 3. Run with example model
 ```bash
-# Start server with ML model
 ./target/release/axon-server \
   --model-repository=../ml_model \
   --model-control-mode=poll
@@ -68,6 +82,98 @@ docker run -v ./models:/models -p 8000:8000 -p 8001:8001 -p 8002:8002 \
 
 ---
 
+## CLI Reference
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `--model-repository` | `/models` | Path to model repository |
+| `--model-control-mode` | `none` | `none` or `poll` (auto-reload) |
+| `--repository-poll-secs` | `30` | Poll interval in seconds |
+| `--http-port` | `8000` | HTTP REST port |
+| `--grpc-port` | `8001` | gRPC port |
+| `--metrics-port` | `8002` | Prometheus metrics port |
+| `--inference-timeout-ms` | `30000` | Max inference time before 504 |
+| `--num-threads` | `0` | Inference threads (0 = auto) |
+| `--concurrency-per-model` | `4` | Max concurrent requests per model |
+| `--log-level` | `info` | Log level: trace, debug, info, warn, error |
+| `--log-dir` | `/tmp/logs/axon` | Log directory (JSON, daily rotation) |
+
+---
+
+## Builtin Functions (Rhai BLS)
+
+23 builtin functions available in all Rhai scripts for pre/post processing:
+
+### ML / Math
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `softmax` | `(arr) → arr` | Logits to probabilities |
+| `sigmoid` | `(arr) → arr` | Sigmoid activation |
+| `argmax` | `(arr) → int` | Index of max value |
+| `argmin` | `(arr) → int` | Index of min value |
+| `topk` | `(arr, k) → arr` | Top-K values with indices |
+| `threshold` | `(arr, val) → arr` | Binary thresholding |
+| `clip` | `(arr, min, max) → arr` | Clamp values to range |
+
+### NLP
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `tokenize` | `(text) → map` | HuggingFace tokenizer (requires tokenizer.json) |
+| `decode_tokens` | `(ids) → string` | Token IDs back to text |
+| `pad_sequence` | `(arr, len, pad) → arr` | Pad/truncate to fixed length |
+| `text_lower` | `(text) → string` | Lowercase conversion |
+| `regex_replace` | `(text, pattern, repl) → string` | Regex text replacement |
+
+### Tabular / Normalization
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `normalize` | `(arr, method) → arr` | "minmax" or "l2" normalization |
+| `standardize` | `(arr, mean, std) → arr` | Z-score standardization |
+| `one_hot` | `(index, n) → arr` | One-hot encoding |
+| `label_encode` | `(value, map) → int` | Categorical to numeric |
+| `fill_missing` | `(arr, strategy) → arr` | Fill NaN: "zero", "mean", "median" |
+
+### Computer Vision
+| Function | Signature | Description |
+|----------|-----------|-------------|
+| `decode_image` | `(base64) → map` | Decode JPEG/PNG to pixel array |
+| `resize_image` | `(pixels, sh, sw, dh, dw, c) → arr` | Bilinear resize |
+| `normalize_image` | `(pixels, mean, std) → arr` | Per-channel normalization |
+| `image_to_chw` | `(pixels, h, w, c) → arr` | HWC to CHW layout |
+| `center_crop` | `(pixels, sh, sw, ch, cw, c) → arr` | Center crop |
+| `grayscale` | `(pixels, h, w) → arr` | RGB to grayscale |
+| `nms` | `(boxes, scores, iou) → arr` | Non-Maximum Suppression |
+
+### Example: Sentiment Analysis Decoder
+```rhai
+fn execute(inputs) {
+    let logits = inputs.get("logits").as_f64();
+    let probs = softmax(logits);
+    let label = argmax(probs);
+
+    return #{
+        "label": create_tensor_i64("label", [1], [label]),
+        "probs": create_tensor_f64("probs", [3], probs),
+    };
+}
+```
+
+---
+
+## Logging
+
+Three-layer logging architecture, all non-blocking:
+
+| Layer | Output | Content |
+|-------|--------|---------|
+| **stdout** | Terminal | Model loading, health, startup table only |
+| **file** | `/tmp/logs/axon/axon-server.YYYY-MM-DD.json` | Everything (JSON, daily rotation) |
+| **OTEL** | OTLP endpoint | Everything (if `OTEL_EXPORTER_OTLP_ENDPOINT` set) |
+
+Inference tracing logs include `model`, `latency_ms`, `total_ms` for each request.
+
+---
+
 ## Documentation
 
 Full documentation on the **[Wiki](https://github.com/mustafacavusoglu/axon/wiki)**:
@@ -76,7 +182,9 @@ Full documentation on the **[Wiki](https://github.com/mustafacavusoglu/axon/wiki
 |-------|-------------|
 | [Config Reference](https://github.com/mustafacavusoglu/axon/wiki/Config-Reference) | YAML & pbtxt config format |
 | [BLS / Scripting](https://github.com/mustafacavusoglu/axon/wiki/BLS-Scripting) | Rhai scripting engine |
+| [Builtin Functions](https://github.com/mustafacavusoglu/axon/wiki/Builtin-Functions) | 23 preprocessing/postprocessing functions |
 | [Ensemble Pipeline](https://github.com/mustafacavusoglu/axon/wiki/Ensemble-Pipeline) | Declarative model chaining |
+| [Logging](https://github.com/mustafacavusoglu/axon/wiki/Logging) | Structured logging & OTEL |
 | [Deployment](https://github.com/mustafacavusoglu/axon/wiki/Deployment) | CLI, Docker, Compose |
 | [Metrics](https://github.com/mustafacavusoglu/axon/wiki/Metrics) | Prometheus metrics |
 
@@ -90,7 +198,7 @@ Full documentation on the **[Wiki](https://github.com/mustafacavusoglu/axon/wiki
 | `nlp_model/` | `tokenizer`, `ner_model`, `decoder`, `pipeline` | BLS + Ensemble NLP pipeline |
 
 ```bash
-# NLP ensemble — text to named entities (no scripting)
+# NLP ensemble — text to named entities
 curl -s -X POST http://localhost:8000/v2/models/pipeline/infer \
   -H 'Content-Type: application/json' \
   -d '{"inputs":[{"name":"raw_text","shape":[1],"datatype":"BYTES","data":["John lives in Paris"]}]}'
