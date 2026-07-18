@@ -1,0 +1,38 @@
+*.ipynb
+*.onnx.data
+*.onnx
+*.pb.rs
+.DS_Store
+axon-server
+.venv/
+__pycache__/
+*.pyc
+
+target/
+vendor/
+
+.claude/
+
+bin/
+dist/
+
+*.exe
+*.dll
+*.so
+*.dylib
+
+# local_models: tüm lokal denemeleri ignore et
+local_models/*
+
+# locals: tüm lokal dosyalar
+locals/
+
+# models: büyük/üretilen model dosyalarını ignore et
+models/**/tokenizer.json
+models/**/tokenizer_config.json
+models/**/special_tokens_map.json
+models/**/vocab.txt
+
+# plan.md sadece lokalde
+plan.md
+models/**/labels.json

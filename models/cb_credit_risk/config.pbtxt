@@ -1,0 +1,112 @@
+# Triton Inference Server model configuration
+# Auto-generated — model: cb_credit_risk
+
+name: "cb_credit_risk"
+platform: "onnxruntime_onnx"
+max_batch_size: 8
+
+# ── Input: 15 features ──────────────────────
+input [
+  {
+    name: "age"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "annual_income"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "credit_score"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "debt_to_income_ratio"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "employment_years"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "num_open_accounts"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "num_late_payments"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "loan_amount"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "loan_term_months"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "has_cosigner"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "home_ownership"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "existing_customer_years"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "num_dependents"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "monthly_expenses"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  },
+  {
+    name: "savings_balance"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  }
+]
+
+# ── Output ─────────────────────────────────────────────
+output [
+    {
+      name: "output_label"
+      data_type: TYPE_INT64
+      dims: [ 1 ]
+    },
+    {
+      name: "output_probability"
+      data_type: TYPE_FP32
+      dims: [ 2 ]
+    }
+]
+
+# ── Dynamic batching ───────────────────────────────────
+dynamic_batching {
+  max_queue_delay_microseconds: 100
+}
+
+# ── Instance group (CPU-only) ──────────────────────────
+instance_group [
+  {
+    count: 2
+    kind: KIND_CPU
+  }
+]

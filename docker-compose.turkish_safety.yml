@@ -1,0 +1,35 @@
+version: "3.9"
+
+services:
+  axon-server:
+    build:
+      context: .
+      dockerfile: Dockerfile.inference-engine
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    volumes:
+      - ./models/axon_turkish_safety/turkish_safety_tokenizer:/models/turkish_safety_tokenizer:ro
+      - ./models/axon_turkish_safety/turkish_safety_model:/models/turkish_safety_model:ro
+      - ./models/axon_turkish_safety/turkish_safety_decoder:/models/turkish_safety_decoder:ro
+      - ./models/axon_turkish_safety/turkish_safety_pipeline:/models/turkish_safety_pipeline:ro
+
+      - ./models/cb_credit_risk:/models/cb_credit_risk:ro
+      - ./models/xgb_california_housing:/models/xgb_california_housing:ro
+      - ./models/skl_random_forest_breast_cancer:/models/skl_random_forest_breast_cancer:ro
+      - ./models/echo_preprocess:/models/echo_preprocess:ro
+      - turkish-safety-logs:/tmp/logs/axon
+    command:
+      - "--model-repository=/models"
+      - "--model-control-mode=poll"
+      - "--http-port=8000"
+      - "--grpc-port=8001"
+      - "--metrics-port=8002"
+      - "--log-level=info"
+      - "--log-dir=/tmp/logs/axon"
+      - "--inference-timeout-ms=60000"
+    restart: unless-stopped
+
+volumes:
+  turkish-safety-logs:

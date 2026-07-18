@@ -1,0 +1,90 @@
+syntax = "proto3";
+
+package inference.kfs;
+
+option go_package = "github.com/mustafacavusoglu/axon/control-plane/api/kfs";
+
+service GRPCInferenceService {
+  rpc ServerLive(ServerLiveRequest)         returns (ServerLiveResponse);
+  rpc ServerReady(ServerReadyRequest)       returns (ServerReadyResponse);
+  rpc ModelReady(ModelReadyRequest)         returns (ModelReadyResponse);
+  rpc ServerMetadata(ServerMetadataRequest) returns (ServerMetadataResponse);
+  rpc ModelMetadata(ModelMetadataRequest)   returns (ModelMetadataResponse);
+  rpc ModelInfer(ModelInferRequest)         returns (ModelInferResponse);
+}
+
+message ServerLiveRequest {}
+
+message ServerLiveResponse {
+  bool live = 1;
+}
+
+message ServerReadyRequest {}
+
+message ServerReadyResponse {
+  bool ready = 1;
+}
+
+message ModelReadyRequest {
+  string name    = 1;
+  string version = 2;
+}
+
+message ModelReadyResponse {
+  bool ready = 1;
+}
+
+message ServerMetadataRequest {}
+
+message ServerMetadataResponse {
+  string name    = 1;
+  string version = 2;
+}
+
+message ModelMetadataRequest {
+  string name    = 1;
+  string version = 2;
+}
+
+message ModelMetadataResponse {
+  string name           = 1;
+  repeated string versions = 2;
+  string platform       = 3;
+  repeated TensorMetadata inputs  = 4;
+  repeated TensorMetadata outputs = 5;
+}
+
+message TensorMetadata {
+  string name     = 1;
+  string datatype = 2;
+  repeated int64 shape = 3;
+}
+
+message ModelInferRequest {
+  string id                   = 1;
+  string model_name           = 2;
+  string model_version        = 3;
+  repeated InferInput inputs  = 4;
+  repeated InferOutput outputs = 5;
+}
+
+message ModelInferResponse {
+  string id                    = 1;
+  string model_name            = 2;
+  string model_version         = 3;
+  repeated InferOutput outputs = 4;
+}
+
+message InferInput {
+  string name        = 1;
+  repeated int64 shape = 2;
+  string datatype    = 3;
+  bytes raw_data     = 4;
+}
+
+message InferOutput {
+  string name        = 1;
+  repeated int64 shape = 2;
+  string datatype    = 3;
+  bytes raw_data     = 4;
+}

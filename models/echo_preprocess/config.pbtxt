@@ -1,0 +1,20 @@
+name: "echo_preprocess"
+platform: "script"
+max_batch_size: 8
+
+input {
+  name: "features"
+  data_type: TYPE_FP32
+  dims: [1]
+}
+
+output {
+  name: "features"
+  data_type: TYPE_FP32
+  dims: [1]
+}
+
+instance_group {
+  count: 2
+  kind: KIND_CPU
+}

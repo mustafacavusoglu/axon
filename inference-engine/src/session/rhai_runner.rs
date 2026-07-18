@@ -1,0 +1,423 @@
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+use parking_lot::Mutex as PLMutex;
+use rhai::{Dynamic, Engine, Scope, AST};
+use tokenizers::Tokenizer;
+use tokio::sync::Semaphore;
+
+use super::types::{InferenceOutput, InputTensor, TensorData};
+use crate::session::pool::SessionPool;
+
+#[derive(Clone)]
+struct RhaiTensor {
+    name: String,
+    shape: Vec<i64>,
+    datatype: String,
+    data: RhaiTensorData,
+}
+
+#[derive(Clone)]
+enum RhaiTensorData {
+    F64(Vec<f64>),
+    I64(Vec<i64>),
+    String(Vec<String>),
+}
+
+impl RhaiTensor {
+    fn from_input(name: String, tensor: InputTensor) -> Self {
+        let shape: Vec<i64> = match &tensor {
+            InputTensor::F32(_, s) => s.iter().map(|&x| x as i64).collect(),
+            InputTensor::I32(_, s) => s.iter().map(|&x| x as i64).collect(),
+            InputTensor::I64(_, s) => s.iter().map(|&x| x as i64).collect(),
+            InputTensor::String(_, s) => s.iter().map(|&x| x as i64).collect(),
+        };
+        let datatype = match &tensor {
+            InputTensor::F32(_, _) => "FP32",
+            InputTensor::I32(_, _) => "INT32",
+            InputTensor::I64(_, _) => "INT64",
+            InputTensor::String(_, _) => "BYTES",
+        };
+        let data = match tensor {
+            InputTensor::F32(d, _) => {
+                RhaiTensorData::F64(d.into_iter().map(|v| v as f64).collect())
+            }
+            InputTensor::I32(d, _) => {
+                RhaiTensorData::I64(d.into_iter().map(|v| v as i64).collect())
+            }
+            InputTensor::I64(d, _) => RhaiTensorData::I64(d),
+            InputTensor::String(d, _) => RhaiTensorData::String(d),
+        };
+        RhaiTensor {
+            name,
+            shape,
+            datatype: datatype.to_string(),
+            data,
+        }
+    }
+
+    fn into_output(self) -> (Vec<i64>, TensorData) {
+        match self.data {
+            RhaiTensorData::F64(d) => (
+                self.shape,
+                TensorData::F32(d.into_iter().map(|v| v as f32).collect()),
+            ),
+            RhaiTensorData::I64(d) => (self.shape, TensorData::I64(d)),
+            RhaiTensorData::String(d) => {
+                let len = d.len() as i64;
+                (vec![len], TensorData::String(d))
+            }
+        }
+    }
+
+    fn into_input(self) -> InputTensor {
+        let shape: Vec<usize> = self.shape.iter().map(|&x| x as usize).collect();
+        match self.data {
+            RhaiTensorData::F64(d) => {
+                InputTensor::F32(d.into_iter().map(|v| v as f32).collect(), shape)
+            }
+            RhaiTensorData::I64(d) => InputTensor::I64(d, shape),
+            RhaiTensorData::String(d) => InputTensor::String(d, shape),
+        }
+    }
+
+    fn from_output(name: String, shape: Vec<i64>, data: TensorData) -> Self {
+        let datatype = data.dtype_str().to_string();
+        let rhai_data = match data {
+            TensorData::F32(d) => RhaiTensorData::F64(d.into_iter().map(|v| v as f64).collect()),
+            TensorData::I32(d) => RhaiTensorData::I64(d.into_iter().map(|v| v as i64).collect()),
+            TensorData::I64(d) => RhaiTensorData::I64(d),
+            TensorData::String(d) => RhaiTensorData::String(d),
+        };
+        RhaiTensor {
+            name,
+            shape,
+            datatype,
+            data: rhai_data,
+        }
+    }
+}
+
+pub struct RhaiRunner {
+    engine: Arc<Engine>,
+    ast: AST,
+    semaphore: Arc<Semaphore>,
+    script_path: PathBuf,
+}
+
+impl RhaiRunner {
+    pub fn load(script_path: &Path, pool: SessionPool, concurrency: usize) -> anyhow::Result<Self> {
+        let script_content = std::fs::read_to_string(script_path).map_err(|e| {
+            anyhow::anyhow!("failed to read script {}: {}", script_path.display(), e)
+        })?;
+
+        let _script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+
+        let mut engine = Engine::new();
+
+        engine.register_type::<RhaiTensor>();
+
+        engine.register_get("name", |t: &mut RhaiTensor| t.name.clone());
+        engine.register_get("shape", |t: &mut RhaiTensor| -> Vec<Dynamic> {
+            t.shape.iter().map(|&d| Dynamic::from(d)).collect()
+        });
+        engine.register_get("datatype", |t: &mut RhaiTensor| t.datatype.clone());
+
+        engine.register_fn("as_f64", |t: &mut RhaiTensor| -> Vec<Dynamic> {
+            match &t.data {
+                RhaiTensorData::F64(d) => d.iter().map(|&v| Dynamic::from(v)).collect(),
+                _ => vec![],
+            }
+        });
+
+        engine.register_fn("as_i64", |t: &mut RhaiTensor| -> Vec<Dynamic> {
+            match &t.data {
+                RhaiTensorData::I64(d) => d.iter().map(|&v| Dynamic::from(v)).collect(),
+                _ => vec![],
+            }
+        });
+
+        engine.register_fn("as_string", |t: &mut RhaiTensor| -> String {
+            match &t.data {
+                RhaiTensorData::String(d) => d.first().cloned().unwrap_or_default(),
+                _ => String::new(),
+            }
+        });
+
+        engine.register_fn("as_f64_array", |t: &mut RhaiTensor| -> Vec<Dynamic> {
+            match &t.data {
+                RhaiTensorData::F64(d) => d.iter().map(|&v| Dynamic::from(v)).collect(),
+                _ => vec![],
+            }
+        });
+
+        engine.register_fn("as_i64_array", |t: &mut RhaiTensor| -> Vec<Dynamic> {
+            match &t.data {
+                RhaiTensorData::I64(d) => d.iter().map(|&v| Dynamic::from(v)).collect(),
+                _ => vec![],
+            }
+        });
+
+        engine.register_fn(
+            "create_tensor_f64",
+            |name: &str, shape: Dynamic, data: rhai::Array| -> RhaiTensor {
+                let shape_i64: Vec<i64> = if shape.is::<Vec<i64>>() {
+                    shape.cast::<Vec<i64>>()
+                } else if shape.is::<rhai::Array>() {
+                    let arr = shape.cast::<rhai::Array>();
+                    arr.iter().map(|v| v.as_int().unwrap_or(1)).collect()
+                } else if shape.is_int() {
+                    vec![shape.as_int().unwrap_or(1)]
+                } else {
+                    vec![1]
+                };
+                let data_f64: Vec<f64> = data.iter().map(|v| v.as_float().unwrap_or(0.0)).collect();
+                RhaiTensor {
+                    name: name.to_string(),
+                    shape: shape_i64,
+                    datatype: "FP32".to_string(),
+                    data: RhaiTensorData::F64(data_f64),
+                }
+            },
+        );
+
+        engine.register_fn(
+            "create_tensor_i64",
+            |name: &str, shape: Dynamic, data: rhai::Array| -> RhaiTensor {
+                let shape_i64: Vec<i64> = if shape.is::<Vec<i64>>() {
+                    shape.cast::<Vec<i64>>()
+                } else if shape.is::<rhai::Array>() {
+                    let arr = shape.cast::<rhai::Array>();
+                    arr.iter().map(|v| v.as_int().unwrap_or(1)).collect()
+                } else if shape.is_int() {
+                    vec![shape.as_int().unwrap_or(1)]
+                } else {
+                    vec![1]
+                };
+                let data_i64: Vec<i64> = data.iter().map(|v| v.as_int().unwrap_or(0)).collect();
+                RhaiTensor {
+                    name: name.to_string(),
+                    shape: shape_i64,
+                    datatype: "INT64".to_string(),
+                    data: RhaiTensorData::I64(data_i64),
+                }
+            },
+        );
+
+        engine.register_fn(
+            "create_tensor_string",
+            |name: &str, shape: rhai::Array, data: rhai::Array| -> RhaiTensor {
+                let shape_i64: Vec<i64> = shape.iter().map(|v| v.as_int().unwrap_or(1)).collect();
+                let strings: Vec<String> = data
+                    .iter()
+                    .map(|v| v.clone().into_string().unwrap_or_default())
+                    .collect();
+                RhaiTensor {
+                    name: name.to_string(),
+                    shape: shape_i64,
+                    datatype: "BYTES".to_string(),
+                    data: RhaiTensorData::String(strings),
+                }
+            },
+        );
+
+        let script_dir2 = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        engine.register_fn("read_lines", move |path: &str| -> Vec<Dynamic> {
+            // Prevent path traversal: only allow plain filenames, no slashes or dots.
+            if path.contains('/') || path.contains('\\') || path.contains("..") {
+                tracing::warn!(path, "read_lines: rejected path with traversal components");
+                return vec![];
+            }
+            let full_path = script_dir2.join(path);
+            let mut lines = Vec::new();
+            if let Ok(content) = std::fs::read_to_string(&full_path) {
+                for line in content.lines() {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty() {
+                        lines.push(Dynamic::from(trimmed.to_string()));
+                    }
+                }
+            }
+            lines
+        });
+
+        engine.register_fn("split_words", |text: &str| -> Vec<Dynamic> {
+            let mut words: Vec<Dynamic> = Vec::new();
+            let mut current = String::new();
+            for ch in text.chars() {
+                if ch.is_whitespace() || (ch.is_ascii_punctuation() && ch != '-' && ch != '#') {
+                    if !current.is_empty() {
+                        words.push(current.clone().into());
+                        current.clear();
+                    }
+                } else {
+                    current.push(ch);
+                }
+            }
+            if !current.is_empty() {
+                words.push(current.into());
+            }
+            words
+        });
+
+        let script_dir3 = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let tokenizer_path = script_dir3.join("tokenizer.json");
+        let tokenizer: Arc<PLMutex<Option<Tokenizer>>> = if tokenizer_path.exists() {
+            match Tokenizer::from_file(&tokenizer_path) {
+                Ok(t) => {
+                    tracing::info!("loaded tokenizer.json from {}", tokenizer_path.display());
+                    Arc::new(PLMutex::new(Some(t)))
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "failed to load tokenizer.json from {}: {e}",
+                        tokenizer_path.display()
+                    );
+                    Arc::new(PLMutex::new(None))
+                }
+            }
+        } else {
+            Arc::new(PLMutex::new(None))
+        };
+
+        super::rhai_builtins::register_all(&mut engine, tokenizer.clone());
+
+        engine.register_fn(
+            "tokenize",
+            move |text: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+                let tok = tokenizer.lock();
+                let tokenizer = tok
+                    .as_ref()
+                    .ok_or_else(|| "tokenizer.json not loaded".to_string())?;
+                let encoding = tokenizer
+                    .encode(text, true)
+                    .map_err(|e| format!("tokenization failed: {e}"))?;
+                let ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
+                let mask: Vec<i64> = encoding
+                    .get_attention_mask()
+                    .iter()
+                    .map(|&m| m as i64)
+                    .collect();
+                let n = ids.len() as i64;
+                let mut map = rhai::Map::new();
+                map.insert(
+                    "input_ids".into(),
+                    Dynamic::from(RhaiTensor {
+                        name: "input_ids".to_string(),
+                        shape: vec![1, n],
+                        datatype: "INT64".to_string(),
+                        data: RhaiTensorData::I64(ids),
+                    }),
+                );
+                map.insert(
+                    "attention_mask".into(),
+                    Dynamic::from(RhaiTensor {
+                        name: "attention_mask".to_string(),
+                        shape: vec![1, n],
+                        datatype: "INT64".to_string(),
+                        data: RhaiTensorData::I64(mask),
+                    }),
+                );
+                Ok(map)
+            },
+        );
+
+        let bls_pool = pool.clone();
+        engine.register_fn(
+            "infer",
+            move |model_name: &str,
+                  inputs: rhai::Map|
+                  -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
+                let mut input_tensors: Vec<(String, InputTensor)> = Vec::new();
+                for (key, value) in inputs {
+                    let tensor: RhaiTensor = if value.is::<RhaiTensor>() {
+                        value.cast::<RhaiTensor>()
+                    } else {
+                        return Err(format!(
+                            "expected Tensor for input '{}', got {:?}",
+                            key,
+                            value.type_name()
+                        )
+                        .into());
+                    };
+                    input_tensors.push((key.to_string(), tensor.into_input()));
+                }
+
+                let session = bls_pool
+                    .get_latest(model_name)
+                    .ok_or_else(|| format!("model '{model_name}' not found or not ready"))?;
+
+                let outputs = session
+                    .runner
+                    .run(input_tensors)
+                    .map_err(|e| format!("BLS inference failed for '{model_name}': {e}"))?;
+
+                let mut output_map = rhai::Map::new();
+                for (name, shape, data) in outputs {
+                    let tensor = RhaiTensor::from_output(name.clone(), shape, data);
+                    output_map.insert(name.into(), Dynamic::from(tensor));
+                }
+                Ok(output_map)
+            },
+        );
+
+        let ast = engine.compile(script_content).map_err(|e| {
+            anyhow::anyhow!("failed to compile script {}: {}", script_path.display(), e)
+        })?;
+
+        tracing::info!(
+            path = %script_path.display(),
+            instances = concurrency,
+            "Rhai script compiled"
+        );
+
+        Ok(Self {
+            engine: Arc::new(engine),
+            ast,
+            semaphore: Arc::new(Semaphore::new(concurrency.max(1))),
+            script_path: script_path.to_path_buf(),
+        })
+    }
+
+    pub fn concurrency_semaphore(&self) -> &Arc<Semaphore> {
+        &self.semaphore
+    }
+
+    pub fn run(&self, inputs: Vec<(String, InputTensor)>) -> anyhow::Result<InferenceOutput> {
+        let mut scope = Scope::new();
+
+        let mut input_map = rhai::Map::new();
+        for (name, tensor) in inputs {
+            let rhai_tensor = RhaiTensor::from_input(name.clone(), tensor);
+            input_map.insert(name.into(), Dynamic::from(rhai_tensor));
+        }
+
+        let outputs_map: rhai::Map = self
+            .engine
+            .call_fn(&mut scope, &self.ast, "execute", (input_map,))
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Rhai script '{}' execution failed: {}",
+                    self.script_path.display(),
+                    e
+                )
+            })?;
+
+        let mut outputs: InferenceOutput = Vec::new();
+        for (key, value) in outputs_map {
+            let tensor: RhaiTensor = if value.is::<RhaiTensor>() {
+                value.cast::<RhaiTensor>()
+            } else {
+                return Err(anyhow::anyhow!(
+                    "Rhai script '{}' returned non-Tensor value for output '{}'",
+                    self.script_path.display(),
+                    key
+                ));
+            };
+            let (shape, data) = tensor.into_output();
+            outputs.push((key.to_string(), shape, data));
+        }
+
+        Ok(outputs)
+    }
+}
