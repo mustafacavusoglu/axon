@@ -200,7 +200,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
-    ort::init().commit().map_err(|e| anyhow::anyhow!("ONNX Runtime init failed: {}", e))?;
+    ort::init().commit()?;
     let pool = SessionPool::new(inference_threads)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
