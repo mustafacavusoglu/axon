@@ -20,6 +20,7 @@ use tracing_subscriber::Layer;
 
 use config::ServerConfig;
 use session::pool::SessionPool;
+use anyhow::Context;
 
 struct LogGuards {
     _stdout: tracing_appender::non_blocking::WorkerGuard,
@@ -200,7 +201,7 @@ fn main() -> anyhow::Result<()> {
     };
 
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
-    ort::init().commit()?;
+    ort::init().commit().context("ONNX Runtime init failed")?;
     let pool = SessionPool::new(inference_threads)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
