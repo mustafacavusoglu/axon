@@ -18,9 +18,9 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
+use anyhow::Context;
 use config::ServerConfig;
 use session::pool::SessionPool;
-use anyhow::Context;
 
 struct LogGuards {
     _stdout: tracing_appender::non_blocking::WorkerGuard,
