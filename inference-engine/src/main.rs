@@ -18,7 +18,6 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
-use anyhow::Context;
 use config::ServerConfig;
 use session::pool::SessionPool;
 
@@ -201,7 +200,10 @@ fn main() -> anyhow::Result<()> {
     };
 
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
-    ort::init().commit().context("ONNX Runtime init failed")?;
+    // Windows: explicit ONNX Runtime init prevents deadlock at commit_from_file
+    if !ort::init().commit() {
+        anyhow::bail!("ONNX Runtime init failed");
+    }
     let pool = SessionPool::new(inference_threads)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
