@@ -76,7 +76,7 @@ impl OnnxRunner {
         let level = if has_external_data {
             // Level0 = no optimization; large transformer models can hang for
             // minutes at Level1+ during graph shape-inference over external data.
-            GraphOptimizationLevel::Level0
+            GraphOptimizationLevel::Level1
         } else {
             GraphOptimizationLevel::Level1
         };
