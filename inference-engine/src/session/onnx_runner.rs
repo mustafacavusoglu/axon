@@ -90,7 +90,11 @@ impl OnnxRunner {
             .map(|m| m.len() as f64 / 1_048_576.0)
             .unwrap_or(0.0);
         tracing::info!(path = %model_path.display(), size_mb = format!("{file_size:.1}"), "committing ONNX session...");
-        eprintln!("[axon] committing ONNX session: {} ({:.1} MB)", model_path.display(), file_size);
+        eprintln!(
+            "[axon] committing ONNX session: {} ({:.1} MB)",
+            model_path.display(),
+            file_size
+        );
         builder
             .with_optimization_level(level)
             .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
