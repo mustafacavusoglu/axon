@@ -12,6 +12,9 @@ if [ -d "$MODEL_SRC" ] && [ "$(ls -A "$MODEL_SRC" 2>/dev/null)" ]; then
     echo "axon: copying models from $MODEL_SRC to $MODEL_DST (WSL2/9p workaround)..."
     cp -r "$MODEL_SRC"/* "$MODEL_DST"/
     echo "axon: models copied, starting server..."
+echo "=== /models contents ==="
+find /models -type f -o -type d | sort
+echo "========================="
 fi
 
 exec axon-server "$@"
