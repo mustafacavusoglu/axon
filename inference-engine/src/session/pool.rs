@@ -36,14 +36,11 @@ pub struct SessionPool {
 }
 
 impl SessionPool {
-    pub fn new(num_threads: usize) -> anyhow::Result<Self> {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .thread_name(|i| format!("infer-worker-{i}"))
-            .build_global()
-            .context("failed to build rayon thread pool")?;
-
-        tracing::info!(num_threads, "rayon thread pool initialised");
+    pub fn new(_num_threads: usize) -> anyhow::Result<Self> {
+        // Global thread pool removed: ONNX Runtime manages its own intra-op
+        // threads, and rayon's global pool was unused but caused deadlocks
+        // on AMD64 Linux builds during Session::commit_from_file.
+        tracing::info!("session pool initialised (ONNX Runtime manages threading)");
 
         Ok(Self {
             sessions: Arc::new(DashMap::new()),

@@ -200,9 +200,8 @@ fn main() -> anyhow::Result<()> {
     };
 
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
-    // ONNX Runtime init: must happen before rayon thread pool (prevents deadlock).
-    // OMP_NUM_THREADS=1 prevents ONNX RT from spawning its own thread pool
-    // which conflicts with rayon on AMD64 Linux builds.
+    // ONNX Runtime init: explicit environment setup prevents deadlock
+    // on AMD64 Linux where lazy init can hang during Session::commit_from_file.
     std::env::set_var("OMP_NUM_THREADS", "1");
     if !ort::init().commit() {
         anyhow::bail!("ONNX Runtime init failed");
