@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
 
