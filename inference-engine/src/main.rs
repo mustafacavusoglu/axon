@@ -204,7 +204,10 @@ fn main() -> anyhow::Result<()> {
     // on AMD64 Linux where lazy init can hang during Session::commit_from_file.
     std::env::set_var("OMP_NUM_THREADS", "1");
     std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
-    if !ort::init().commit() {
+    eprintln!("[axon] ort::init() starting...");
+    let ort_ok = ort::init().commit();
+    eprintln!("[axon] ort::init() result: {ort_ok}");
+    if !ort_ok {
         anyhow::bail!("ONNX Runtime init failed");
     }
     let pool = SessionPool::new(inference_threads)?;
