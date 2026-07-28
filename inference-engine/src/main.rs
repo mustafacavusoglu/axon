@@ -203,6 +203,7 @@ fn main() -> anyhow::Result<()> {
     // ONNX Runtime init: explicit environment setup prevents deadlock
     // on AMD64 Linux where lazy init can hang during Session::commit_from_file.
     std::env::set_var("OMP_NUM_THREADS", "1");
+    std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
     if !ort::init().commit() {
         anyhow::bail!("ONNX Runtime init failed");
     }
