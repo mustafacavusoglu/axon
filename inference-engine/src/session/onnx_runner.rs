@@ -74,7 +74,7 @@ impl OnnxRunner {
         }
 
         let level = if has_external_data {
-            GraphOptimizationLevel::Level0
+            GraphOptimizationLevel::Disable
         } else {
             GraphOptimizationLevel::Level1
         };
