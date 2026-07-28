@@ -23,7 +23,9 @@ pub async fn load_all_models(repo_path: &Path, pool: &SessionPool) {
     let repo = repo_path.to_path_buf();
     let pool = pool.clone();
 
+    eprintln!("[axon] load_all_models: dispatching spawn_blocking...");
     let result = tokio::task::spawn_blocking(move || load_all_models_sync(&repo, &pool)).await;
+    eprintln!("[axon] load_all_models: spawn_blocking completed");
 
     if let Err(e) = result {
         tracing::error!(error = %e, "model loading task panicked");
@@ -31,13 +33,21 @@ pub async fn load_all_models(repo_path: &Path, pool: &SessionPool) {
 }
 
 fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
+    eprintln!(
+        "[axon] load_all_models_sync: starting, repo={}",
+        repo_path.display()
+    );
     if !repo_path.is_dir() {
         tracing::warn!(path = %repo_path.display(), "model repository not found");
         return;
     }
 
+    eprintln!("[axon] load_all_models_sync: reading dir...");
     let entries = match std::fs::read_dir(repo_path) {
-        Ok(e) => e,
+        Ok(e) => {
+            eprintln!("[axon] load_all_models_sync: dir read OK, iterating entries...");
+            e
+        }
         Err(e) => {
             tracing::error!(error = %e, "failed to read model repository");
             return;

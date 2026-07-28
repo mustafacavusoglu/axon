@@ -102,6 +102,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Prepare test models (cb_credit_risk only)
+        run: |
+          mkdir -p /tmp/test-models
+          cp -r models/cb_credit_risk /tmp/test-models/
+          cp -r models/echo_preprocess /tmp/test-models/
+          echo "Test models:"
+          find /tmp/test-models -type f | sort
+
       - name: Smoke test AMD64
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
@@ -110,7 +118,7 @@ jobs:
           docker pull "$IMAGE"
           
           docker run -d --name axon-test \
-            -v ${{ github.workspace }}/models:/models-in:ro \
+            -v /tmp/test-models:/models-in:ro \
             -p 8000:8000 \
             "$IMAGE"
           
