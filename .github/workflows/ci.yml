@@ -24,6 +24,9 @@ jobs:
           filters: |
             src:
               - 'inference-engine/**'
+              - 'Dockerfile.inference-engine'
+              - 'docker-entrypoint.sh'
+              - '.github/workflows/ci.yml'
 
   test:
     runs-on: ubuntu-latest
