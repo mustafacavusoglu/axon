@@ -90,10 +90,15 @@ jobs:
           sudo cp /tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so* /usr/local/lib/
           sudo ldconfig
 
+      - name: Patch ort crate (ZipMap/map type support)
+        run: |
+          find ~/.cargo/registry/src -path '*/ort-2.0.0-rc.12/src/value/type.rs' \
+            -exec sh -c 'sed -i "s/todo!();/return Err(crate::Error::new_with_code(crate::ErrorCode::GenericFailure, \"Map type not supported\"));/" "$1" && echo "patched $1"' _ {} \;
+
       - name: Run ONNX load test
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
-          cargo test --test onnx_load_amd64 -- --nocapture
+          RUST_BACKTRACE=1 cargo test --test onnx_load_amd64 -- --nocapture
         working-directory: inference-engine
         timeout-minutes: 2
 
