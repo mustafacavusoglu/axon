@@ -123,18 +123,20 @@ jobs:
             "$IMAGE"
           
           echo "Waiting for ONNX models to load..."
-          for i in $(seq 1 15); do
+          for i in $(seq 1 30); do
             if curl -sf http://localhost:8000/v2/health/ready 2>/dev/null; then
               echo "✅ PASS — all models loaded"
               curl -s http://localhost:8000/v2/models | python3 -m json.tool
-              docker logs axon-test --tail 20
+              echo "=== FULL CONTAINER LOGS ==="
+              docker logs axon-test
               exit 0
             fi
-            printf "  attempt %2d/15...\n" "$i"
+            printf "  attempt %2d/30...\n" "$i"
             sleep 4
           done
-          
+
           echo "❌ FAIL — container did not become ready"
+          echo "=== FULL CONTAINER LOGS ==="
           docker logs axon-test
           exit 1
 
