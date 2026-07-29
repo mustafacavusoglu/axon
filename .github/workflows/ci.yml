@@ -65,6 +65,44 @@ jobs:
         run: cargo test
         working-directory: inference-engine
 
+  onnx-load-test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            inference-engine/target
+          key: ${{ runner.os }}-onnx-test-${{ hashFiles('inference-engine/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-onnx-test-
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev libgomp1
+
+      - name: Download ONNX Runtime
+        run: |
+          curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz" -o /tmp/onnx.tgz
+          tar xzf /tmp/onnx.tgz -C /tmp
+          sudo cp /tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so* /usr/local/lib/
+          sudo ldconfig
+
+      - name: Run ONNX load test
+        run: |
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+          cargo test --test onnx_load_amd64 -- --nocapture
+        working-directory: inference-engine
+        timeout-minutes: 2
+
   docker-amd64:
     needs: [changes, test]
     if: |
