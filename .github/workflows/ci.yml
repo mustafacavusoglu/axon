@@ -84,12 +84,17 @@ jobs:
         working-directory: inference-engine
         timeout-minutes: 3
 
-      - name: cargo test ONNX load (release)
+      - name: Build release ONNX test
+        run: cargo test --release --test onnx_load_amd64 --no-run
+        working-directory: inference-engine
+        timeout-minutes: 10
+
+      - name: Run release ONNX load test
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           RUST_BACKTRACE=1 cargo test --release --test onnx_load_amd64 -- --nocapture
         working-directory: inference-engine
-        timeout-minutes: 3
+        timeout-minutes: 1
 
   docker-amd64:
     needs: [changes, test]
