@@ -205,14 +205,7 @@ fn main() -> anyhow::Result<()> {
     std::env::set_var("OMP_NUM_THREADS", "1");
     std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
     eprintln!("[axon] ort::init() starting...");
-    let thread_opts = ort::environment::GlobalThreadPoolOptions::default()
-        .with_inter_threads(1)
-        .expect("inter threads")
-        .with_intra_threads(1)
-        .expect("intra threads")
-        .with_spin_control(false)
-        .expect("spin control");
-    let ort_ok = ort::init().with_global_thread_pool(thread_opts).commit();
+    let ort_ok = ort::init().commit();
     eprintln!("[axon] ort::init() result: {ort_ok}");
     if !ort_ok {
         anyhow::bail!("ONNX Runtime init failed");

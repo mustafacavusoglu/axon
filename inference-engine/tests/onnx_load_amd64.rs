@@ -15,15 +15,7 @@ fn model_path() -> PathBuf {
 fn test_onnx_load_cb_credit_risk() {
     std::env::set_var("OMP_NUM_THREADS", "1");
     std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
-
-    let thread_opts = ort::environment::GlobalThreadPoolOptions::default()
-        .with_inter_threads(1)
-        .unwrap()
-        .with_intra_threads(1)
-        .unwrap()
-        .with_spin_control(false)
-        .unwrap();
-    ort::init().with_global_thread_pool(thread_opts).commit();
+    ort::init().commit();
 
     let path = model_path();
     assert!(path.exists(), "model file not found: {}", path.display());
