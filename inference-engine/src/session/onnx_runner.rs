@@ -59,7 +59,10 @@ impl OnnxRunner {
         match rx.recv_timeout(Duration::from_secs(30)) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!("[axon] TIMEOUT: create_session hung for 30s on {}", model_path.display());
+                eprintln!(
+                    "[axon] TIMEOUT: create_session hung for 30s on {}",
+                    model_path.display()
+                );
                 anyhow::bail!(
                     "ONNX session load timed out after 30s: {}",
                     model_path.display()
