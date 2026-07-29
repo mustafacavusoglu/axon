@@ -36,12 +36,3 @@ models/**/vocab.txt
 # plan.md sadece lokalde
 plan.md
 models/**/labels.json
-
-# lgbm_credit_risk: CI smoke test için küçük ONNX
-!models/lgbm_credit_risk/1/model.onnx
-
-# cb_credit_risk: AMD64 smoke test ONNX
-!models/cb_credit_risk/1/model.onnx
-
-# test_model: minimal ONNX (y=2*x+1) for CI diagnostic
-!models/test_model/1/model.onnx

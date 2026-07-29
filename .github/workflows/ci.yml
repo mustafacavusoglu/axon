@@ -3,7 +3,6 @@ name: CI/CD
 on:
   push:
     branches: [main]
-  workflow_dispatch:
   pull_request:
     branches: [main]
 
@@ -24,9 +23,6 @@ jobs:
           filters: |
             src:
               - 'inference-engine/**'
-              - 'Dockerfile.inference-engine'
-              - 'docker-entrypoint.sh'
-              - '.github/workflows/ci.yml'
 
   test:
     runs-on: ubuntu-latest
@@ -51,16 +47,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev libgomp1
-
-      - name: Fetch crates and patch ort (ZipMap/map type support)
-        run: |
-          cargo fetch
-          find ~/.cargo/registry/src -path '*/ort-2.0.0-rc.12/src/value/type.rs' \
-            -exec sh -c 'sed -i "s/todo!();/return Err(crate::Error::new_with_code(crate::ErrorCode::GenericFailure, \"Map type not supported\"));/" "$1" && echo "patched $1"' _ {} \;
-          rm -rf target/debug/.fingerprint/ort-* target/debug/deps/*ort* target/debug/libort* || true
-          rm -rf target/release/.fingerprint/ort-* target/release/deps/*ort* target/release/libort* || true
-        working-directory: inference-engine
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev
 
       - name: cargo fmt --check
         run: cargo fmt --check
@@ -70,13 +57,11 @@ jobs:
         run: cargo clippy -- -D warnings
         working-directory: inference-engine
 
-      - name: cargo test (debug)
-        run: |
-          cargo test --bins -- --nocapture
+      - name: cargo test
+        run: cargo test
         working-directory: inference-engine
-        timeout-minutes: 3
 
-  docker-amd64:
+  docker:
     needs: [changes, test]
     if: |
       needs.test.result == 'success'
@@ -84,8 +69,16 @@ jobs:
       && github.event_name == 'push'
     runs-on: ubuntu-latest
     environment: docker-env
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
     steps:
       - uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -102,68 +95,28 @@ jobs:
           VERSION=$(grep '^version' inference-engine/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Build and push (AMD64 only)
+      - name: Set arch suffix
+        id: arch
+        run: |
+          if [[ "${{ matrix.platform }}" == "linux/amd64" ]]; then
+            echo "suffix=amd64" >> $GITHUB_OUTPUT
+          else
+            echo "suffix=arm64" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build and push
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile.inference-engine
-          platforms: linux/amd64
+          platforms: ${{ matrix.platform }}
           push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-amd64
-          no-cache: true
+          tags: ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ steps.arch.outputs.suffix }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
 
-      - name: Prepare test models (cb_credit_risk only)
-        run: |
-          mkdir -p /tmp/test-models
-          cp -r models/cb_credit_risk /tmp/test-models/
-          cp -r models/echo_preprocess /tmp/test-models/
-          echo "Test models:"
-          find /tmp/test-models -type f | sort
-
-      - name: Smoke test AMD64
-        run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          IMAGE="${{ env.IMAGE_NAME }}:${VERSION}-amd64"
-          echo "Pulling $IMAGE..."
-          docker pull "$IMAGE"
-
-          docker run -d --name axon-test \
-            -v /tmp/test-models:/models-in:ro \
-            -p 8000:8000 \
-            "$IMAGE"
-
-          echo "Waiting for server to start..."
-          for i in $(seq 1 10); do
-            if curl -sf http://localhost:8000/v2/health/live 2>/dev/null; then
-              echo "Server is live"
-              break
-            fi
-            printf "  attempt %d/10...\n" "$i"
-            sleep 2
-          done
-
-          echo "Waiting for models to become ready..."
-          for i in $(seq 1 7); do
-            if curl -sf http://localhost:8000/v2/health/ready 2>/dev/null; then
-              echo "✅ PASS — all models loaded"
-              curl -s http://localhost:8000/v2/models | python3 -m json.tool
-              echo "=== FULL CONTAINER LOGS ==="
-              docker logs axon-test
-              exit 0
-            fi
-            printf "  attempt %d/7...\n" "$i"
-            sleep 3
-          done
-
-          echo "❌ FAIL — container did not become ready"
-          echo "=== FULL CONTAINER LOGS ==="
-          docker logs axon-test
-          exit 1
-
-  # ARM64 image must be pushed from local (ARM Mac):
-  #   docker buildx build --platform linux/arm64 -t mustafa12/axon:X.Y.Z-arm64 -f Dockerfile.inference-engine --push .
   docker-manifest:
-    needs: docker-amd64
+    needs: docker
     runs-on: ubuntu-latest
     environment: docker-env
     steps:

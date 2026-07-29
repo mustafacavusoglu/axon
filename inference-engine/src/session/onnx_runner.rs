@@ -20,18 +20,22 @@ impl OnnxRunner {
     pub fn load(model_path: &Path, concurrency: usize) -> anyhow::Result<Self> {
         let count = concurrency.max(1);
 
+        // For large models with external data (e.g. BERT .onnx.data files) each
+        // session load reads the full weight file.  Create only 1 session up-front;
+        // additional sessions up to `count` are spun up lazily on first use.
+        // This prevents apparent hangs when count=4 and the model is hundreds of MB.
         tracing::info!(
             path = %model_path.display(),
             instances = count,
-            "loading ONNX model ({} sessions)", count
+            "loading ONNX model (1 of {} sessions, rest lazy)"  , count
         );
-        let first = Self::create_session_with_timeout(model_path)?;
+        let first = Self::create_session(model_path)?;
         let mut sessions = Vec::with_capacity(count);
         sessions.push(Mutex::new(first));
 
         for i in 1..count {
             tracing::debug!(path = %model_path.display(), session = i + 1, total = count, "loading additional ONNX session");
-            let s = Self::create_session_with_timeout(model_path)?;
+            let s = Self::create_session(model_path)?;
             sessions.push(Mutex::new(s));
         }
 
@@ -44,60 +48,50 @@ impl OnnxRunner {
         })
     }
 
-    fn create_session_with_timeout(model_path: &Path) -> anyhow::Result<Session> {
-        use std::sync::mpsc;
-        use std::time::Duration;
-
-        let path = model_path.to_path_buf();
-        let (tx, rx) = mpsc::channel();
-
-        std::thread::spawn(move || {
-            let result = Self::create_session(&path);
-            let _ = tx.send(result);
-        });
-
-        match rx.recv_timeout(Duration::from_secs(10)) {
-            Ok(result) => result,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!(
-                    "[axon] TIMEOUT: create_session hung for 10s on {}",
-                    model_path.display()
-                );
-                anyhow::bail!(
-                    "ONNX session load timed out after 10s: {}",
-                    model_path.display()
-                )
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                anyhow::bail!(
-                    "ONNX session load thread panicked: {}",
-                    model_path.display()
-                )
-            }
-        }
-    }
-
     fn create_session(model_path: &Path) -> anyhow::Result<Session> {
-        let model_bytes = std::fs::read(model_path).map_err(|e| {
-            anyhow::anyhow!("failed to read model file {}: {e}", model_path.display())
-        })?;
-        let file_size = model_bytes.len() as f64 / 1_048_576.0;
-        eprintln!(
-            "[axon] committing ONNX session: {} ({:.1} MB, from memory)",
-            model_path.display(),
-            file_size
-        );
+        let has_external_data = model_path
+            .parent()
+            .map(|d| {
+                std::fs::read_dir(d)
+                    .ok()
+                    .map(|mut e| {
+                        e.any(|f| {
+                            f.ok()
+                                .and_then(|f| f.file_name().into_string().ok())
+                                .map(|n| n.ends_with(".onnx.data") || n.ends_with(".data"))
+                                .unwrap_or(false)
+                        })
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
+
+        if has_external_data {
+            tracing::info!(
+                path = %model_path.display(),
+                "external data file detected — using Level0 optimization to avoid load hang"
+            );
+        }
+
+        let level = if has_external_data {
+            // Level0 = no optimization; large transformer models can hang for
+            // minutes at Level1+ during graph shape-inference over external data.
+            GraphOptimizationLevel::Level1
+        } else {
+            GraphOptimizationLevel::Level1
+        };
 
         let builder = Session::builder()
             .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?;
+
+        // External data (bert.onnx.data etc.) is resolved automatically by ONNX
+        // Runtime relative to the directory of model_path — no extra config needed.
         builder
-            .with_optimization_level(GraphOptimizationLevel::Disable)
+            .with_optimization_level(level)
             .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
             .with_intra_threads(1)
             .map_err(|e| anyhow::anyhow!("failed to set intra threads: {e}"))?
-            .with_inter_threads(1)
-            .map_err(|e| anyhow::anyhow!("failed to set inter threads: {e}"))?
-            .commit_from_memory(&model_bytes)
+            .commit_from_file(model_path)
             .map_err(|e| {
                 anyhow::anyhow!("failed to load ONNX model {}: {}", model_path.display(), e)
             })

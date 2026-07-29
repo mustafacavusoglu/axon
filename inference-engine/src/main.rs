@@ -200,16 +200,6 @@ fn main() -> anyhow::Result<()> {
     };
 
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
-    // ONNX Runtime init: explicit environment setup prevents deadlock
-    // on AMD64 Linux where lazy init can hang during Session::commit_from_file.
-    std::env::set_var("OMP_NUM_THREADS", "1");
-    std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");
-    eprintln!("[axon] ort::init() starting...");
-    let ort_ok = ort::init().commit();
-    eprintln!("[axon] ort::init() result: {ort_ok}");
-    if !ort_ok {
-        anyhow::bail!("ONNX Runtime init failed");
-    }
     let pool = SessionPool::new(inference_threads)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -220,37 +210,17 @@ fn main() -> anyhow::Result<()> {
     rt.block_on(async move {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
+        tracing::info!(
+            target: "axon::console",
+            "loading models from {}",
+            config.model_repository.display()
+        );
+
         metrics::init();
+        model_repository::load_all_models(&config.model_repository, &pool).await;
+        metrics::set_models_count(pool.model_count() as i64);
 
-        let http_pool = pool.clone();
-        let http_repo = config.model_repository.clone();
-        let http_timeout_ms = config.inference_timeout_ms;
-        let http_shutdown = shutdown_rx.clone();
-        let http_handle = tokio::spawn(http_server::serve(
-            config.http_port,
-            http_pool,
-            http_repo,
-            http_timeout_ms,
-            http_shutdown,
-        ));
-
-        let grpc_pool = pool.clone();
-        let grpc_repo = config.model_repository.clone();
-        let grpc_timeout_ms = config.inference_timeout_ms;
-        let grpc_shutdown = shutdown_rx.clone();
-        let grpc_handle = tokio::spawn(grpc_server::serve(
-            config.grpc_port,
-            grpc_pool,
-            grpc_repo,
-            grpc_timeout_ms,
-            grpc_shutdown,
-        ));
-
-        let metrics_shutdown = shutdown_rx.clone();
-        let metrics_handle = tokio::spawn(metrics::serve_metrics(
-            config.metrics_port,
-            metrics_shutdown,
-        ));
+        print_startup_table(&config, &pool);
 
         let poll_handle = if config.model_control_mode == "poll" {
             let poll_pool = pool.clone();
@@ -265,20 +235,38 @@ fn main() -> anyhow::Result<()> {
             None
         };
 
-        tracing::info!(
-            target: "axon::console",
-            "loading models from {}",
-            config.model_repository.display()
-        );
+        let http_handle = {
+            let http_pool = pool.clone();
+            let http_repo = config.model_repository.clone();
+            let timeout_ms = config.inference_timeout_ms;
+            let rx = shutdown_rx.clone();
+            tokio::spawn(http_server::serve(
+                config.http_port,
+                http_pool,
+                http_repo,
+                timeout_ms,
+                rx,
+            ))
+        };
 
-        let load_pool = pool.clone();
-        let load_repo = config.model_repository.clone();
-        let load_config = config.clone();
-        tokio::spawn(async move {
-            model_repository::load_all_models(&load_repo, &load_pool).await;
-            metrics::set_models_count(load_pool.model_count() as i64);
-            print_startup_table(&load_config, &load_pool);
-        });
+        let grpc_handle = {
+            let grpc_pool = pool.clone();
+            let grpc_repo = config.model_repository.clone();
+            let timeout_ms = config.inference_timeout_ms;
+            let rx = shutdown_rx.clone();
+            tokio::spawn(grpc_server::serve(
+                config.grpc_port,
+                grpc_pool,
+                grpc_repo,
+                timeout_ms,
+                rx,
+            ))
+        };
+
+        let metrics_handle = {
+            let rx = shutdown_rx.clone();
+            tokio::spawn(metrics::serve_metrics(config.metrics_port, rx))
+        };
 
         signal::ctrl_c().await.ok();
         tracing::info!(target: "axon::console", "shutdown signal received, draining...");

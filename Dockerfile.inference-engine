@@ -27,10 +27,9 @@ LABEL org.opencontainers.image.title="axon" \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
-    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ONNX_VERSION=1.17.3
+ARG ONNX_VERSION=1.24.2
 ARG TARGETARCH=arm64
 RUN if [ "$TARGETARCH" = "arm64" ]; then ARCH="aarch64"; else ARCH="x64"; fi && \
     curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ARCH}-${ONNX_VERSION}.tgz" -o /tmp/onnx.tgz && \
@@ -39,12 +38,11 @@ RUN if [ "$TARGETARCH" = "arm64" ]; then ARCH="aarch64"; else ARCH="x64"; fi && 
     rm -rf /opt/onnxruntime-linux-* /tmp/onnx.tgz
 
 COPY --from=builder /build/target/release/axon-server /usr/local/bin/axon-server
-COPY docker-entrypoint.sh /usr/local/bin/
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
 VOLUME ["/models"]
 EXPOSE 8000 8001 8002
 
-ENTRYPOINT ["docker-entrypoint.sh"]
+ENTRYPOINT ["axon-server"]
 CMD ["--model-repository=/models", "--http-port=8000", "--grpc-port=8001", "--metrics-port=8002"]
