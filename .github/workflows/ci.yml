@@ -158,9 +158,10 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             suffix: amd64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            suffix: arm64
+          # ARM64 built locally (push-arm64.sh) — QEMU too slow in CI
+          # - target: aarch64-unknown-linux-gnu
+          #   os: ubuntu-24.04-arm
+          #   suffix: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -216,5 +217,6 @@ jobs:
           name: v${{ steps.ver.outputs.version }}
           files: |
             release/axon-server-linux-amd64
-            release/axon-server-linux-arm64
+            # ARM64 binary built locally (push-arm64.sh)
+            # release/axon-server-linux-arm64
           generate_release_notes: true
