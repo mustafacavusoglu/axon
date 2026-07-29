@@ -78,36 +78,6 @@ impl OnnxRunner {
     }
 
     fn create_session(model_path: &Path) -> anyhow::Result<Session> {
-        let has_external_data = model_path
-            .parent()
-            .map(|d| {
-                std::fs::read_dir(d)
-                    .ok()
-                    .map(|mut e| {
-                        e.any(|f| {
-                            f.ok()
-                                .and_then(|f| f.file_name().into_string().ok())
-                                .map(|n| n.ends_with(".onnx.data") || n.ends_with(".data"))
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-
-        if has_external_data {
-            tracing::info!(
-                path = %model_path.display(),
-                "external data file detected — using Level0 optimization to avoid load hang"
-            );
-        }
-
-        let level = if has_external_data {
-            GraphOptimizationLevel::Disable
-        } else {
-            GraphOptimizationLevel::Level1
-        };
-
         let builder = Session::builder()
             .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?;
 
@@ -123,7 +93,7 @@ impl OnnxRunner {
             file_size
         );
         builder
-            .with_optimization_level(level)
+            .with_optimization_level(GraphOptimizationLevel::Disable)
             .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
             .with_intra_threads(1)
             .map_err(|e| anyhow::anyhow!("failed to set intra threads: {e}"))?
