@@ -1,5 +1,6 @@
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use ort::session::builder::GraphOptimizationLevel;
 use ort::session::Session;
@@ -31,25 +32,37 @@ fn test_onnx_load_cb_credit_risk() {
     let model_bytes = std::fs::read(&path).expect("failed to read model file");
     eprintln!("[test] read into memory in {:?}", start.elapsed());
 
-    let session_start = Instant::now();
-    let result = Session::builder()
-        .expect("builder")
-        .with_optimization_level(GraphOptimizationLevel::Disable)
-        .expect("opt level")
-        .with_intra_threads(1)
-        .expect("intra")
-        .with_inter_threads(1)
-        .expect("inter")
-        .commit_from_memory(&model_bytes);
+    let (tx, rx) = mpsc::channel();
+    let model_bytes_clone = model_bytes.clone();
+    std::thread::spawn(move || {
+        let result = Session::builder()
+            .expect("builder")
+            .with_optimization_level(GraphOptimizationLevel::Disable)
+            .expect("opt level")
+            .with_intra_threads(1)
+            .expect("intra")
+            .with_inter_threads(1)
+            .expect("inter")
+            .commit_from_memory(&model_bytes_clone);
+        let _ = tx.send(result);
+    });
 
-    match &result {
-        Ok(_) => eprintln!("[test] session created in {:?}", session_start.elapsed()),
-        Err(e) => eprintln!(
-            "[test] session FAILED in {:?}: {e}",
-            session_start.elapsed()
-        ),
+    match rx.recv_timeout(Duration::from_secs(10)) {
+        Ok(Ok(session)) => {
+            eprintln!("[test] session created in {:?}", start.elapsed());
+            drop(session);
+        }
+        Ok(Err(e)) => {
+            eprintln!("[test] session FAILED in {:?}: {e}", start.elapsed());
+            panic!("failed to create ONNX session: {e}");
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            eprintln!("[test] TIMEOUT: commit_from_memory hung for 10s");
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            panic!("session creation thread panicked");
+        }
     }
 
-    let _session = result.expect("failed to create ONNX session");
     eprintln!("[test] total load time: {:?}", start.elapsed());
 }
