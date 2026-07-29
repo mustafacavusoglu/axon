@@ -152,8 +152,18 @@ jobs:
             -p 8000:8000 \
             "$IMAGE"
 
-          echo "Waiting for ONNX models to load..."
-          for i in $(seq 1 5); do
+          echo "Waiting for server to start..."
+          for i in $(seq 1 10); do
+            if curl -sf http://localhost:8000/v2/health/live 2>/dev/null; then
+              echo "Server is live"
+              break
+            fi
+            printf "  attempt %d/10...\n" "$i"
+            sleep 2
+          done
+
+          echo "Waiting for models to become ready..."
+          for i in $(seq 1 15); do
             if curl -sf http://localhost:8000/v2/health/ready 2>/dev/null; then
               echo "✅ PASS — all models loaded"
               curl -s http://localhost:8000/v2/models | python3 -m json.tool
@@ -161,7 +171,7 @@ jobs:
               docker logs axon-test
               exit 0
             fi
-            printf "  attempt %d/5...\n" "$i"
+            printf "  attempt %d/15...\n" "$i"
             sleep 3
           done
 
