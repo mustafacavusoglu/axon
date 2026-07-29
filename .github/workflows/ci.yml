@@ -55,9 +55,9 @@ jobs:
 
       - name: Download ONNX Runtime
         run: |
-          curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v1.24.2/onnxruntime-linux-x64-1.24.2.tgz" -o /tmp/onnx.tgz
+          curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-linux-x64-1.17.3.tgz" -o /tmp/onnx.tgz
           tar xzf /tmp/onnx.tgz -C /tmp
-          sudo cp /tmp/onnxruntime-linux-x64-1.24.2/lib/libonnxruntime.so* /usr/local/lib/
+          sudo cp /tmp/onnxruntime-linux-x64-1.17.3/lib/libonnxruntime.so* /usr/local/lib/
           sudo ldconfig
 
       - name: Fetch crates and patch ort (ZipMap/map type support)
