@@ -84,6 +84,17 @@ jobs:
         working-directory: inference-engine
         timeout-minutes: 3
 
+      - name: Diagnose ONNX Runtime hang (strace)
+        run: |
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+          sudo apt-get install -y -qq strace
+          cargo test --test onnx_load_amd64 --no-run
+          timeout 12 strace -f -o /tmp/ort.strace cargo test --test onnx_load_amd64 -- test_onnx_simple_model --nocapture 2>&1 || true
+          echo "=== Last 50 syscalls (thread $(grep -c '^[0-9]' /tmp/ort.strace) total) ==="
+          tail -50 /tmp/ort.strace
+        working-directory: inference-engine
+        timeout-minutes: 3
+
   docker-amd64:
     needs: [changes, test]
     if: |
