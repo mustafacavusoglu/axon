@@ -51,14 +51,7 @@ jobs:
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev libgomp1
-
-      - name: Download ONNX Runtime
-        run: |
-          curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v1.17.3/onnxruntime-linux-x64-1.17.3.tgz" -o /tmp/onnx.tgz
-          tar xzf /tmp/onnx.tgz -C /tmp
-          sudo cp /tmp/onnxruntime-linux-x64-1.17.3/lib/libonnxruntime.so* /usr/local/lib/
-          sudo ldconfig
+          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev
 
       - name: Fetch crates and patch ort (ZipMap/map type support)
         run: |
@@ -79,14 +72,12 @@ jobs:
 
       - name: cargo test (debug)
         run: |
-          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           cargo test --bins -- --nocapture
         working-directory: inference-engine
         timeout-minutes: 3
 
       - name: Diagnose ONNX Runtime hang (strace)
         run: |
-          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           sudo apt-get install -y -qq strace
           cargo test --test onnx_load_amd64 --no-run
           timeout 12 strace -f -o /tmp/ort.strace cargo test --test onnx_load_amd64 -- test_onnx_simple_model --nocapture 2>&1 || true

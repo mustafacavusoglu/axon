@@ -23,7 +23,7 @@ serde_json = "1"
 serde_yaml = "0.9"
 anyhow = "1"
 thiserror = "2"
-ort = { version = "2.0.0-rc.12", features = ["load-dynamic"] }
+ort = { version = "2.0.0-rc.12", default-features = false, features = ["download-binaries"] }
 arc-swap = "1"
 tokio-stream = "0.1"
 tracing-opentelemetry = "0.33.0"
