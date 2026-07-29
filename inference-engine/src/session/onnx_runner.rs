@@ -78,20 +78,18 @@ impl OnnxRunner {
     }
 
     fn create_session(model_path: &Path) -> anyhow::Result<Session> {
-        let builder = Session::builder()
-            .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?;
-
-        // External data (bert.onnx.data etc.) is resolved automatically by ONNX
-        // Runtime relative to the directory of model_path — no extra config needed.
-        let file_size = std::fs::metadata(model_path)
-            .map(|m| m.len() as f64 / 1_048_576.0)
-            .unwrap_or(0.0);
-        tracing::info!(path = %model_path.display(), size_mb = format!("{file_size:.1}"), "committing ONNX session...");
+        let model_bytes = std::fs::read(model_path).map_err(|e| {
+            anyhow::anyhow!("failed to read model file {}: {e}", model_path.display())
+        })?;
+        let file_size = model_bytes.len() as f64 / 1_048_576.0;
         eprintln!(
-            "[axon] committing ONNX session: {} ({:.1} MB)",
+            "[axon] committing ONNX session: {} ({:.1} MB, from memory)",
             model_path.display(),
             file_size
         );
+
+        let builder = Session::builder()
+            .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?;
         builder
             .with_optimization_level(GraphOptimizationLevel::Disable)
             .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
@@ -99,7 +97,7 @@ impl OnnxRunner {
             .map_err(|e| anyhow::anyhow!("failed to set intra threads: {e}"))?
             .with_inter_threads(1)
             .map_err(|e| anyhow::anyhow!("failed to set inter threads: {e}"))?
-            .commit_from_file(model_path)
+            .commit_from_memory(&model_bytes)
             .map_err(|e| {
                 anyhow::anyhow!("failed to load ONNX model {}: {}", model_path.display(), e)
             })
