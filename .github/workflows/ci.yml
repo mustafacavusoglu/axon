@@ -77,11 +77,19 @@ jobs:
         run: cargo clippy -- -D warnings
         working-directory: inference-engine
 
-      - name: cargo test
+      - name: cargo test (debug)
         run: |
           export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
           cargo test -- --nocapture
         working-directory: inference-engine
+        timeout-minutes: 3
+
+      - name: cargo test ONNX load (release)
+        run: |
+          export LD_LIBRARY_PATH=/usr/local/lib:$LD_LIBRARY_PATH
+          RUST_BACKTRACE=1 cargo test --release --test onnx_load_amd64 -- --nocapture
+        working-directory: inference-engine
+        timeout-minutes: 3
 
   docker-amd64:
     needs: [changes, test]
@@ -117,8 +125,7 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          no-cache: true
 
       - name: Prepare test models (cb_credit_risk only)
         run: |

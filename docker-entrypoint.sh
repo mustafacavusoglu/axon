@@ -1,6 +1,9 @@
 #!/bin/sh
 set -e
 
+export OMP_NUM_THREADS=1
+export OMP_WAIT_POLICY=PASSIVE
+
 # WSL2 workaround: copy bind-mounted models to local fs
 # WSL2's 9p filesystem is ~100x slower for random reads than native ext4.
 # ONNX Runtime's CreateSession does heavy random I/O during graph parsing,
