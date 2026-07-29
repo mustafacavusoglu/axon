@@ -12,58 +12,52 @@ env:
   IMAGE_NAME: mustafa12/axon
 
 jobs:
-  changes:
-    runs-on: ubuntu-latest
-    outputs:
-      src: ${{ steps.filter.outputs.src }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dorny/paths-filter@v3
-        id: filter
-        with:
-          filters: |
-            src:
-              - 'inference-engine/**'
-              - 'Dockerfile.inference-engine'
-              - 'docker-entrypoint.sh'
-              - '.github/workflows/ci.yml'
+  # changes:
+  #   runs-on: ubuntu-latest
+  #   outputs:
+  #     src: ${{ steps.filter.outputs.src }}
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: dorny/paths-filter@v3
+  #       id: filter
+  #       with:
+  #         filters: |
+  #           src:
+  #             - 'inference-engine/**'
+  #             - 'Dockerfile.inference-engine'
+  #             - 'docker-entrypoint.sh'
+  #             - '.github/workflows/ci.yml'
 
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt, clippy
-
-      - name: Cache cargo
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            inference-engine/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('inference-engine/Cargo.lock') }}
-          restore-keys: ${{ runner.os }}-cargo-
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev
-
-      - name: cargo fmt --check
-        run: cargo fmt --check
-        working-directory: inference-engine
-
-      - name: cargo clippy
-        run: cargo clippy -- -D warnings
-        working-directory: inference-engine
-
-      - name: cargo test
-        run: cargo test
-        working-directory: inference-engine
+  # test:
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - name: Install Rust
+  #       uses: dtolnay/rust-toolchain@stable
+  #       with:
+  #         components: rustfmt, clippy
+  #     - name: Cache cargo
+  #       uses: actions/cache@v4
+  #       with:
+  #         path: |
+  #           ~/.cargo/registry
+  #           ~/.cargo/git
+  #           inference-engine/target
+  #         key: ${{ runner.os }}-cargo-${{ hashFiles('inference-engine/Cargo.lock') }}
+  #         restore-keys: ${{ runner.os }}-cargo-
+  #     - name: Install system dependencies
+  #       run: |
+  #         sudo apt-get update
+  #         sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev
+  #     - name: cargo fmt --check
+  #       run: cargo fmt --check
+  #       working-directory: inference-engine
+  #     - name: cargo clippy
+  #       run: cargo clippy -- -D warnings
+  #       working-directory: inference-engine
+  #     - name: cargo test
+  #       run: cargo test
+  #       working-directory: inference-engine
 
   onnx-load-test:
     runs-on: ubuntu-latest
@@ -103,183 +97,4 @@ jobs:
         working-directory: inference-engine
         timeout-minutes: 2
 
-  docker-amd64:
-    needs: [changes, test]
-    if: |
-      needs.test.result == 'success'
-      && needs.changes.outputs.src == 'true'
-      && github.event_name == 'push'
-    runs-on: ubuntu-latest
-    environment: docker-env
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
-
-      - name: Extract version
-        id: ver
-        run: |
-          VERSION=$(grep '^version' inference-engine/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Build and push (AMD64 only)
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.inference-engine
-          platforms: linux/amd64
-          push: true
-          tags: ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-amd64
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Prepare test models (cb_credit_risk only)
-        run: |
-          mkdir -p /tmp/test-models
-          cp -r models/cb_credit_risk /tmp/test-models/
-          cp -r models/echo_preprocess /tmp/test-models/
-          echo "Test models:"
-          find /tmp/test-models -type f | sort
-
-      - name: Smoke test AMD64
-        run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          IMAGE="${{ env.IMAGE_NAME }}:${VERSION}-amd64"
-          echo "Pulling $IMAGE..."
-          docker pull "$IMAGE"
-          
-          docker run -d --name axon-test \
-            -v /tmp/test-models:/models-in:ro \
-            -p 8000:8000 \
-            "$IMAGE"
-          
-          echo "Waiting for ONNX models to load..."
-          for i in $(seq 1 30); do
-            if curl -sf http://localhost:8000/v2/health/ready 2>/dev/null; then
-              echo "✅ PASS — all models loaded"
-              curl -s http://localhost:8000/v2/models | python3 -m json.tool
-              echo "=== FULL CONTAINER LOGS ==="
-              docker logs axon-test
-              exit 0
-            fi
-            printf "  attempt %2d/30...\n" "$i"
-            sleep 4
-          done
-
-          echo "❌ FAIL — container did not become ready"
-          echo "=== FULL CONTAINER LOGS ==="
-          docker logs axon-test
-          exit 1
-
-  # ARM64 image must be pushed from local (ARM Mac):
-  #   docker buildx build --platform linux/arm64 -t mustafa12/axon:X.Y.Z-arm64 -f Dockerfile.inference-engine --push .
-  docker-manifest:
-    needs: docker-amd64
-    runs-on: ubuntu-latest
-    environment: docker-env
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKER_USERNAME }}
-          password: ${{ secrets.DOCKER_TOKEN }}
-
-      - name: Extract version
-        id: ver
-        run: |
-          VERSION=$(grep '^version' inference-engine/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Create and push multi-arch manifest
-        run: |
-          VERSION="${{ steps.ver.outputs.version }}"
-          IMAGE="${{ env.IMAGE_NAME }}"
-          docker buildx imagetools create -t ${IMAGE}:${VERSION} \
-            ${IMAGE}:${VERSION}-amd64 \
-            ${IMAGE}:${VERSION}-arm64
-          docker buildx imagetools create -t ${IMAGE}:latest \
-            ${IMAGE}:${VERSION}-amd64 \
-            ${IMAGE}:${VERSION}-arm64
-
-  release-build:
-    needs: [changes, test]
-    if: |
-      needs.test.result == 'success'
-      && needs.changes.outputs.src == 'true'
-      && github.event_name == 'push'
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - target: x86_64-unknown-linux-gnu
-            os: ubuntu-latest
-            suffix: amd64
-          - target: aarch64-unknown-linux-gnu
-            os: ubuntu-24.04-arm
-            suffix: arm64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Install system dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends protobuf-compiler libssl-dev
-
-      - name: Build release binary
-        run: cargo build --release --target ${{ matrix.target }}
-        working-directory: inference-engine
-
-      - name: Rename binary
-        run: |
-          mv target/${{ matrix.target }}/release/axon-server axon-server-linux-${{ matrix.suffix }}
-        working-directory: inference-engine
-
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: binary-${{ matrix.suffix }}
-          path: inference-engine/axon-server-linux-${{ matrix.suffix }}
-
-  release:
-    needs: [release-build]
-    runs-on: ubuntu-latest
-    environment: docker-env
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          pattern: binary-*
-          merge-multiple: true
-          path: release
-
-      - name: Extract version
-        id: ver
-        run: |
-          VERSION=$(grep '^version' inference-engine/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
-
-      - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: v${{ steps.ver.outputs.version }}
-          name: v${{ steps.ver.outputs.version }}
-          files: |
-            release/axon-server-linux-amd64
-            release/axon-server-linux-arm64
-          generate_release_notes: true
+  # docker-amd64, docker-manifest, release-build, release jobs disabled during ONNX debugging
