@@ -23,6 +23,8 @@ jobs:
           filters: |
             src:
               - 'inference-engine/**'
+              - 'Dockerfile.inference-engine'
+              - 'docker-entrypoint.sh'
 
   test:
     runs-on: ubuntu-latest
@@ -116,6 +118,34 @@ jobs:
           tags: ${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ steps.arch.outputs.suffix }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Smote test AMD64 ONNX loading
+        if: matrix.platform == 'linux/amd64'
+        shell: bash
+        run: | 
+          set -euo pipefail
+          IMAGE="${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}-${{ steps.arch.outputs.suffix }}"
+          cleanup() { docker rm -f axon-smoke >/dev/null 2>&1 || true; }
+          trap cleanup EXIT
+
+          docker run --name axon-smoke \
+            -v "$PWD/models/test_model:/models/test_model:ro" \
+            -p 18000:8000 \
+            "$IMAGE" 
+
+          for _ in {1..10}; do
+            if curl -s http://localhost:18000/healthz | grep -q "ok"; then
+              echo "Health check passed"
+              exit 0
+            fi
+            echo "Waiting for server to be ready..."
+            sleep 2
+          done
+
+
+          docker logs axon-smoke
+          echo "Health check failed after 10 attempts" >&2
+          exit 1
 
   docker-manifest:
     needs: docker
