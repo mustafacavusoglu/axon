@@ -34,7 +34,7 @@ ARG TARGETARCH=arm64
 RUN case "$(dpkg --print-architecture)" in \
     amd64) ARCH=x64 ;; \
     arm64) ARCH=arm64 ;; \
-    *) echo "Unsupported architecture: $(dpkg --print-architecture)" > &2 && exit 1 ;; \
+    *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2 && exit 1 ;; \
     esac && \
     curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ARCH}-${ONNX_VERSION}.tgz" -o /tmp/onnx.tgz && \
     tar xzf /tmp/onnx.tgz -C /opt && \
@@ -47,7 +47,7 @@ COPY --from=builder /build/target/release/axon-server /usr/local/bin/axon-server
 RUN SERVER_MACHINE="$(od -An -tx2 -j18 -N2 /usr/local/bin/axon-server | tr -d ' ')" && \
     ORT_MACHINE="$(od -An -tx2 -j18 -N2 /usr/local/lib/libonnxruntime.so | tr -d ' ')" && \
     if [ "$SERVER_MACHINE" != "$ORT_MACHINE" ]; then \
-        echo "Architecture mismatch: axon-server is built for $SERVER_MACHINE, but libonnxruntime.so is built for $ORT_MACHINE" > &2 && exit 1; \
+        echo "Architecture mismatch: axon-server is built for $SERVER_MACHINE, but libonnxruntime.so is built for $ORT_MACHINE" >&2 && exit 1; \
     fi
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
