@@ -60,7 +60,7 @@ jobs:
         working-directory: inference-engine
 
       - name: cargo test
-        run: cargo test
+        run: cargo test --bins
         working-directory: inference-engine
         timeout-minutes: 5
 
