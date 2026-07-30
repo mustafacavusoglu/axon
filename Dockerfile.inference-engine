@@ -33,7 +33,7 @@ ARG ONNX_VERSION=1.24.2
 ARG TARGETARCH=arm64
 RUN case "$(dpkg --print-architecture)" in \
     amd64) ARCH=x64 ;; \
-    arm64) ARCH=arm64 ;; \
+    arm64) ARCH=aarch64 ;; \
     *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2 && exit 1 ;; \
     esac && \
     curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ARCH}-${ONNX_VERSION}.tgz" -o /tmp/onnx.tgz && \
