@@ -121,7 +121,7 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Smote test AMD64 ONNX loading
+      - name: Smoke test AMD64 ONNX loading
         if: matrix.platform == 'linux/amd64'
         shell: bash
         run: | 
@@ -130,23 +130,24 @@ jobs:
           cleanup() { docker rm -f axon-smoke >/dev/null 2>&1 || true; }
           trap cleanup EXIT
 
-          docker run --name axon-smoke \
+          docker run -d --name axon-smoke \
             -v "$PWD/models/test_model:/models/test_model:ro" \
             -p 18000:8000 \
-            "$IMAGE" 
+            "$IMAGE"
 
-          for _ in {1..10}; do
-            if curl -s http://localhost:18000/healthz | grep -q "ok"; then
-              echo "Health check passed"
+          for i in {1..15}; do
+            STATUS=$(curl -sf http://localhost:18000/v2/health/ready 2>/dev/null || true)
+            if echo "$STATUS" | grep -q '"ready": true'; then
+              echo "Server ready, health check passed"
               exit 0
             fi
-            echo "Waiting for server to be ready..."
+            echo "[$i/15] Waiting for server to be ready..."
             sleep 2
           done
 
-
+          echo "=== Server logs ==="
           docker logs axon-smoke
-          echo "Health check failed after 10 attempts" >&2
+          echo "Health check failed after 15 attempts" >&2
           exit 1
 
   docker-manifest:
