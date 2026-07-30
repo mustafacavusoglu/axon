@@ -67,6 +67,7 @@ fn test_onnx_simple_model() {
 }
 
 #[test]
+#[ignore = "requires a matching ONNXRuntime shared library; covered by Docker smoke test"]
 fn test_onnx_cb_credit_risk() {
     std::env::set_var("OMP_NUM_THREADS", "1");
     std::env::set_var("OMP_WAIT_POLICY", "PASSIVE");

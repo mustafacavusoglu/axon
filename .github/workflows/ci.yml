@@ -62,6 +62,7 @@ jobs:
       - name: cargo test
         run: cargo test
         working-directory: inference-engine
+        timeout-minutes: 5
 
   docker:
     needs: [changes, test]
