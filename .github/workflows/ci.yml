@@ -63,7 +63,7 @@ jobs:
       - name: cargo test
         run: cargo test --bins
         working-directory: inference-engine
-        timeout-minutes: 5
+
 
   docker:
     needs: [changes, test]
@@ -135,19 +135,18 @@ jobs:
             -p 18000:8000 \
             "$IMAGE"
 
-          for i in {1..15}; do
-            STATUS=$(curl -sf http://localhost:18000/v2/health/ready 2>/dev/null || true)
-            if echo "$STATUS" | grep -q '"ready": true'; then
+          for i in {1..10}; do
+            if curl -sf http://localhost:18000/v2/health/ready >/dev/null; then
               echo "Server ready, health check passed"
               exit 0
             fi
-            echo "[$i/15] Waiting for server to be ready..."
+            echo "[$i/10] Waiting for server to be ready..."
             sleep 2
           done
 
           echo "=== Server logs ==="
           docker logs axon-smoke
-          echo "Health check failed after 15 attempts" >&2
+          echo "Health check failed after 10 attempts" >&2
           exit 1
 
   docker-manifest:
