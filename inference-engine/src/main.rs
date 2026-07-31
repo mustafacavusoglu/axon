@@ -217,23 +217,6 @@ fn main() -> anyhow::Result<()> {
         );
 
         metrics::init();
-        model_repository::load_all_models(&config.model_repository, &pool).await;
-        metrics::set_models_count(pool.model_count() as i64);
-
-        print_startup_table(&config, &pool);
-
-        let poll_handle = if config.model_control_mode == "poll" {
-            let poll_pool = pool.clone();
-            let poll_repo = config.model_repository.clone();
-            let poll_interval = config.repository_poll_secs;
-            let poll_shutdown = shutdown_rx.clone();
-            Some(tokio::spawn(async move {
-                model_repository::poll_loop(poll_repo, poll_pool, poll_interval, poll_shutdown)
-                    .await;
-            }))
-        } else {
-            None
-        };
 
         let http_handle = {
             let http_pool = pool.clone();
@@ -267,6 +250,34 @@ fn main() -> anyhow::Result<()> {
             let rx = shutdown_rx.clone();
             tokio::spawn(metrics::serve_metrics(config.metrics_port, rx))
         };
+
+        let poll_handle = if config.model_control_mode == "poll" {
+            let poll_pool = pool.clone();
+            let poll_repo = config.model_repository.clone();
+            let poll_interval = config.repository_poll_secs;
+            let poll_shutdown = shutdown_rx.clone();
+            Some(tokio::spawn(async move {
+                model_repository::poll_loop(poll_repo, poll_pool, poll_interval, poll_shutdown)
+                    .await;
+            }))
+        } else {
+            None
+        };
+
+        tracing::info!(
+            target: "axon::console",
+            "loading models from {}",
+            config.model_repository.display()
+        );
+
+        let load_pool = pool.clone();
+        let load_repo = config.model_repository.clone();
+        let load_config = config.clone();
+        tokio::spawn(async move {
+            model_repository::load_all_models(&load_repo, &load_pool).await;
+            metrics::set_models_count(load_pool.model_count() as i64);
+            print_startup_table(&load_config, &load_pool);
+        });
 
         signal::ctrl_c().await.ok();
         tracing::info!(target: "axon::console", "shutdown signal received, draining...");

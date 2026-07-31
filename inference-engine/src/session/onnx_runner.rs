@@ -29,13 +29,13 @@ impl OnnxRunner {
             instances = count,
             "loading ONNX model (1 of {} sessions, rest lazy)"  , count
         );
-        let first = Self::create_session(model_path)?;
+        let first = Self::create_session_with_timeout(model_path)?;
         let mut sessions = Vec::with_capacity(count);
         sessions.push(Mutex::new(first));
 
         for i in 1..count {
             tracing::debug!(path = %model_path.display(), session = i + 1, total = count, "loading additional ONNX session");
-            let s = Self::create_session(model_path)?;
+            let s = Self::create_session_with_timeout(model_path)?;
             sessions.push(Mutex::new(s));
         }
 
@@ -46,6 +46,39 @@ impl OnnxRunner {
             semaphore: Arc::new(Semaphore::new(count)),
             model_path: model_path.to_path_buf(),
         })
+    }
+
+    fn create_session_with_timeout(model_path: &Path) -> anyhow::Result<Session> {
+        use std::sync::mpsc;
+        use std::time::Duration;
+
+        let path = model_path.to_path_buf();
+        let (tx, rx) = mpsc::channel();
+
+        std::thread::spawn(move || {
+            let result = Self::create_session(&path);
+            let _ = tx.send(result);
+        });
+
+        match rx.recv_timeout(Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                eprintln!(
+                    "[axon] TIMEOUT: create_session hung for 10s on {}",
+                    model_path.display()
+                );
+                anyhow::bail!(
+                    "ONNX session load timed out after 10s: {}",
+                    model_path.display()
+                )
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                anyhow::bail!(
+                    "ONNX session load thread panicked: {}",
+                    model_path.display()
+                )
+            }
+        }
     }
 
     fn create_session(model_path: &Path) -> anyhow::Result<Session> {
