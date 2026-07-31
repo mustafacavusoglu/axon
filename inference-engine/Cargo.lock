@@ -165,7 +165,6 @@ dependencies = [
  "parking_lot",
  "prometheus",
  "prost 0.13.5",
- "rayon",
  "regex",
  "rhai",
  "serde",

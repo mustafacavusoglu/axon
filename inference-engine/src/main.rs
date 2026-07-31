@@ -11,7 +11,10 @@ use clap::Parser;
 use opentelemetry::trace::TracerProvider as _;
 use opentelemetry_otlp::WithExportConfig;
 use opentelemetry_sdk::trace::SdkTracerProvider;
+#[cfg(not(unix))]
 use tokio::signal;
+#[cfg(unix)]
+use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::watch;
 use tracing_subscriber::filter::Targets;
 use tracing_subscriber::layer::SubscriberExt;
@@ -257,8 +260,14 @@ fn main() -> anyhow::Result<()> {
             let poll_interval = config.repository_poll_secs;
             let poll_shutdown = shutdown_rx.clone();
             Some(tokio::spawn(async move {
-                model_repository::poll_loop(poll_repo, poll_pool, poll_interval, poll_shutdown)
-                    .await;
+                model_repository::poll_loop(
+                    poll_repo,
+                    poll_pool,
+                    poll_interval,
+                    config.concurrency_per_model,
+                    poll_shutdown,
+                )
+                .await;
             }))
         } else {
             None
@@ -273,14 +282,33 @@ fn main() -> anyhow::Result<()> {
         let load_pool = pool.clone();
         let load_repo = config.model_repository.clone();
         let load_config = config.clone();
+        let default_concurrency = config.concurrency_per_model;
         tokio::spawn(async move {
-            model_repository::load_all_models(&load_repo, &load_pool).await;
+            model_repository::load_all_models(&load_repo, &load_pool, default_concurrency).await;
             metrics::set_models_count(load_pool.model_count() as i64);
             print_startup_table(&load_config, &load_pool);
         });
 
-        signal::ctrl_c().await.ok();
-        tracing::info!(target: "axon::console", "shutdown signal received, draining...");
+        #[cfg(unix)]
+        {
+            let mut sigterm =
+                signal(SignalKind::terminate()).expect("failed to install SIGTERM handler");
+            let mut sigint =
+                signal(SignalKind::interrupt()).expect("failed to install SIGINT handler");
+            tokio::select! {
+                _ = sigterm.recv() => {
+                    tracing::info!(target: "axon::console", "SIGTERM received, draining...");
+                }
+                _ = sigint.recv() => {
+                    tracing::info!(target: "axon::console", "SIGINT received, draining...");
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            signal::ctrl_c().await.ok();
+            tracing::info!(target: "axon::console", "shutdown signal received, draining...");
+        }
         let _ = shutdown_tx.send(true);
 
         if let Some(h) = poll_handle {

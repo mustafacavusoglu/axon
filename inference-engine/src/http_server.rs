@@ -380,76 +380,83 @@ async fn run_batch_inference(
             }
         };
 
-        let _permit = match session.concurrency().acquire().await {
-            Ok(p) => p,
-            Err(_) => {
-                responses.push(BatchInferItem {
-                    index,
-                    outputs: None,
-                    error: Some("service unavailable".to_string()),
-                });
-                continue;
-            }
-        };
+        let _permit =
+            match tokio::time::timeout(state.inference_timeout, session.concurrency().acquire())
+                .await
+            {
+                Ok(Ok(p)) => p,
+                _ => {
+                    responses.push(BatchInferItem {
+                        index,
+                        outputs: None,
+                        error: Some("service unavailable".to_string()),
+                    });
+                    continue;
+                }
+            };
         metrics::inc_inflight(&model_name);
 
         let runner = session.runner.clone();
-        let infer_future = tokio::task::spawn_blocking(move || runner.run(inputs));
+        let infer_handle = tokio::task::spawn_blocking(move || runner.run(inputs));
 
-        match tokio::time::timeout(state.inference_timeout, infer_future).await {
-            Ok(Ok(Ok(out))) => {
-                metrics::dec_inflight(&model_name);
-                let outputs: Vec<InferOutputResponse> = out
-                    .into_iter()
-                    .map(|(name, shape, tensor_data)| {
-                        let dtype = tensor_data.dtype_str().to_string();
-                        let data: serde_json::Value = match tensor_data {
-                            crate::session::types::TensorData::F32(d) => serde_json::Value::Array(
-                                d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                            ),
-                            crate::session::types::TensorData::I32(d) => serde_json::Value::Array(
-                                d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                            ),
-                            crate::session::types::TensorData::I64(d) => serde_json::Value::Array(
-                                d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                            ),
-                            crate::session::types::TensorData::String(d) => {
-                                serde_json::Value::Array(
-                                    d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                                )
-                            }
-                        };
-                        InferOutputResponse {
-                            name,
-                            shape,
-                            datatype: dtype,
-                            data,
-                        }
-                    })
-                    .collect();
-                responses.push(BatchInferItem {
-                    index,
-                    outputs: Some(outputs),
-                    error: None,
-                });
+        tokio::select! {
+            result = infer_handle => {
+                match result {
+                    Ok(Ok(out)) => {
+                        metrics::dec_inflight(&model_name);
+                        let outputs: Vec<InferOutputResponse> = out
+                            .into_iter()
+                            .map(|(name, shape, tensor_data)| {
+                                let dtype = tensor_data.dtype_str().to_string();
+                                let data: serde_json::Value = match tensor_data {
+                                    crate::session::types::TensorData::F32(d) => serde_json::Value::Array(
+                                        d.into_iter().map(|v| serde_json::json!(v)).collect(),
+                                    ),
+                                    crate::session::types::TensorData::I32(d) => serde_json::Value::Array(
+                                        d.into_iter().map(|v| serde_json::json!(v)).collect(),
+                                    ),
+                                    crate::session::types::TensorData::I64(d) => serde_json::Value::Array(
+                                        d.into_iter().map(|v| serde_json::json!(v)).collect(),
+                                    ),
+                                    crate::session::types::TensorData::String(d) => {
+                                        serde_json::Value::Array(
+                                            d.into_iter().map(|v| serde_json::json!(v)).collect(),
+                                        )
+                                    }
+                                };
+                                InferOutputResponse {
+                                    name,
+                                    shape,
+                                    datatype: dtype,
+                                    data,
+                                }
+                            })
+                            .collect();
+                        responses.push(BatchInferItem {
+                            index,
+                            outputs: Some(outputs),
+                            error: None,
+                        });
+                    }
+                    Ok(Err(e)) => {
+                        metrics::dec_inflight(&model_name);
+                        responses.push(BatchInferItem {
+                            index,
+                            outputs: None,
+                            error: Some(e.to_string()),
+                        });
+                    }
+                    Err(e) => {
+                        metrics::dec_inflight(&model_name);
+                        responses.push(BatchInferItem {
+                            index,
+                            outputs: None,
+                            error: Some(format!("spawn error: {e}")),
+                        });
+                    }
+                }
             }
-            Ok(Ok(Err(e))) => {
-                metrics::dec_inflight(&model_name);
-                responses.push(BatchInferItem {
-                    index,
-                    outputs: None,
-                    error: Some(e.to_string()),
-                });
-            }
-            Ok(Err(e)) => {
-                metrics::dec_inflight(&model_name);
-                responses.push(BatchInferItem {
-                    index,
-                    outputs: None,
-                    error: Some(format!("spawn error: {e}")),
-                });
-            }
-            Err(_) => {
+            _ = tokio::time::sleep(state.inference_timeout) => {
                 metrics::dec_inflight(&model_name);
                 responses.push(BatchInferItem {
                     index,
@@ -486,11 +493,23 @@ async fn run_inference(
     tracing::debug!(model = %model_name, "inference request received");
 
     let queue_start = Instant::now();
-    let _permit = session.concurrency().acquire().await.map_err(|e| {
-        tracing::warn!(error = %e, "concurrency limit reached");
-        metrics::record_request(&model_name, "503");
-        StatusCode::SERVICE_UNAVAILABLE
-    })?;
+    let _permit = match tokio::time::timeout(
+        state.inference_timeout,
+        session.concurrency().acquire(),
+    )
+    .await
+    {
+        Ok(Ok(p)) => p,
+        Ok(Err(_)) => {
+            metrics::record_request(&model_name, "503");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+        Err(_) => {
+            tracing::warn!(model = %model_name, "semaphore wait timed out");
+            metrics::record_request(&model_name, "503");
+            return Err(StatusCode::SERVICE_UNAVAILABLE);
+        }
+    };
     metrics::record_queue_wait(&model_name, queue_start.elapsed().as_secs_f64());
     metrics::inc_inflight(&model_name);
 
@@ -503,23 +522,27 @@ async fn run_inference(
 
     let start = Instant::now();
     let runner = session.runner.clone();
-    let infer_future = tokio::task::spawn_blocking(move || runner.run(inputs));
+    let infer_handle = tokio::task::spawn_blocking(move || runner.run(inputs));
 
-    let outputs = match tokio::time::timeout(state.inference_timeout, infer_future).await {
-        Ok(Ok(Ok(out))) => out,
-        Ok(Ok(Err(e))) => {
-            metrics::dec_inflight(&model_name);
-            tracing::error!(error = %e, "inference failed");
-            metrics::record_request(&model_name, "500");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+    let outputs = tokio::select! {
+        result = infer_handle => {
+            match result {
+                Ok(Ok(out)) => out,
+                Ok(Err(e)) => {
+                    metrics::dec_inflight(&model_name);
+                    tracing::error!(error = %e, "inference failed");
+                    metrics::record_request(&model_name, "500");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+                Err(e) => {
+                    metrics::dec_inflight(&model_name);
+                    tracing::error!(error = %e, "spawn_blocking failed");
+                    metrics::record_request(&model_name, "500");
+                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                }
+            }
         }
-        Ok(Err(e)) => {
-            metrics::dec_inflight(&model_name);
-            tracing::error!(error = %e, "spawn_blocking failed");
-            metrics::record_request(&model_name, "500");
-            return Err(StatusCode::INTERNAL_SERVER_ERROR);
-        }
-        Err(_) => {
+        _ = tokio::time::sleep(state.inference_timeout) => {
             metrics::dec_inflight(&model_name);
             tracing::warn!(model = %model_name, timeout_ms = state.inference_timeout.as_millis(), "inference timed out");
             metrics::record_request(&model_name, "504");

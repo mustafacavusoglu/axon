@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use anyhow::Context;
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
 
@@ -36,14 +35,11 @@ pub struct SessionPool {
 }
 
 impl SessionPool {
-    pub fn new(num_threads: usize) -> anyhow::Result<Self> {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(num_threads)
-            .thread_name(|i| format!("infer-worker-{i}"))
-            .build_global()
-            .context("failed to build rayon thread pool")?;
-
-        tracing::info!(num_threads, "rayon thread pool initialised");
+    pub fn new(_num_threads: usize) -> anyhow::Result<Self> {
+        tracing::info!(
+            num_threads = _num_threads,
+            "session pool initialised (threading managed by ONNX Runtime)"
+        );
 
         Ok(Self {
             sessions: Arc::new(DashMap::new()),
@@ -61,8 +57,9 @@ impl SessionPool {
 
         if let Some(existing) = self.sessions.get(&key) {
             if existing.state == SessionState::Ready {
-                return Ok(existing.clone());
+                tracing::info!(name, version, "model already loaded, reloading");
             }
+            self.sessions.remove(&key);
         }
 
         if !model_path.exists() {
@@ -100,8 +97,9 @@ impl SessionPool {
 
         if let Some(existing) = self.sessions.get(&key) {
             if existing.state == SessionState::Ready {
-                return Ok(existing.clone());
+                tracing::info!(name, version, "script model already loaded, reloading");
             }
+            self.sessions.remove(&key);
         }
 
         if !script_path.exists() {
@@ -139,8 +137,9 @@ impl SessionPool {
 
         if let Some(existing) = self.sessions.get(&key) {
             if existing.state == SessionState::Ready {
-                return Ok(existing.clone());
+                tracing::info!(name, version, "ensemble model already loaded, reloading");
             }
+            self.sessions.remove(&key);
         }
 
         let count = if concurrency > 0 {

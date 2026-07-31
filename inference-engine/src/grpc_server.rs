@@ -171,10 +171,20 @@ impl GrpcInferenceService for KfsService {
         tracing::debug!(model = %req.model_name, "grpc inference request received");
 
         let queue_start = Instant::now();
-        let _permit = session.concurrency().acquire().await.map_err(|_| {
-            metrics::record_request(&req.model_name, "503");
-            Status::resource_exhausted("concurrency limit")
-        })?;
+        let _permit =
+            match tokio::time::timeout(self.inference_timeout, session.concurrency().acquire())
+                .await
+            {
+                Ok(Ok(p)) => p,
+                Ok(Err(_)) => {
+                    metrics::record_request(&req.model_name, "503");
+                    return Err(Status::resource_exhausted("concurrency limit"));
+                }
+                Err(_) => {
+                    metrics::record_request(&req.model_name, "503");
+                    return Err(Status::resource_exhausted("queue wait timed out"));
+                }
+            };
         metrics::record_queue_wait(&req.model_name, queue_start.elapsed().as_secs_f64());
         metrics::inc_inflight(&req.model_name);
 
@@ -185,21 +195,25 @@ impl GrpcInferenceService for KfsService {
 
         let start = Instant::now();
         let runner = session.runner.clone();
-        let infer_future = tokio::task::spawn_blocking(move || runner.run(inputs));
+        let infer_handle = tokio::task::spawn_blocking(move || runner.run(inputs));
 
-        let outputs = match tokio::time::timeout(self.inference_timeout, infer_future).await {
-            Ok(Ok(Ok(out))) => out,
-            Ok(Ok(Err(e))) => {
-                metrics::dec_inflight(&req.model_name);
-                metrics::record_request(&req.model_name, "500");
-                return Err(Status::internal(format!("inference error: {e}")));
+        let outputs = tokio::select! {
+            result = infer_handle => {
+                match result {
+                    Ok(Ok(out)) => out,
+                    Ok(Err(e)) => {
+                        metrics::dec_inflight(&req.model_name);
+                        metrics::record_request(&req.model_name, "500");
+                        return Err(Status::internal(format!("inference error: {e}")));
+                    }
+                    Err(e) => {
+                        metrics::dec_inflight(&req.model_name);
+                        metrics::record_request(&req.model_name, "500");
+                        return Err(Status::internal(format!("task join error: {e}")));
+                    }
+                }
             }
-            Ok(Err(e)) => {
-                metrics::dec_inflight(&req.model_name);
-                metrics::record_request(&req.model_name, "500");
-                return Err(Status::internal(format!("task join error: {e}")));
-            }
-            Err(_) => {
+            _ = tokio::time::sleep(self.inference_timeout) => {
                 metrics::dec_inflight(&req.model_name);
                 metrics::record_request(&req.model_name, "504");
                 return Err(Status::deadline_exceeded(format!(

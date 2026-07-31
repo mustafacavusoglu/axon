@@ -40,6 +40,12 @@ spec:
             limits:
               cpu: "2000m"
               memory: "2Gi"
+          startupProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8000
+            failureThreshold: 30
+            periodSeconds: 10
           livenessProbe:
             httpGet:
               path: /v2/health/live

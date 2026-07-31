@@ -19,18 +19,21 @@ fn get_circuit_breaker() -> &'static Mutex<CircuitBreaker> {
     CIRCUIT_BREAKER.get_or_init(|| Mutex::new(CircuitBreaker::new()))
 }
 
-pub async fn load_all_models(repo_path: &Path, pool: &SessionPool) {
+pub async fn load_all_models(repo_path: &Path, pool: &SessionPool, default_concurrency: u32) {
     let repo = repo_path.to_path_buf();
     let pool = pool.clone();
 
-    let result = tokio::task::spawn_blocking(move || load_all_models_sync(&repo, &pool)).await;
+    let result = tokio::task::spawn_blocking(move || {
+        load_all_models_sync(&repo, &pool, default_concurrency)
+    })
+    .await;
 
     if let Err(e) = result {
         tracing::error!(error = %e, "model loading task panicked");
     }
 }
 
-fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
+fn load_all_models_sync(repo_path: &Path, pool: &SessionPool, default_concurrency: u32) {
     if !repo_path.is_dir() {
         tracing::warn!(path = %repo_path.display(), "model repository not found");
         return;
@@ -70,7 +73,7 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool) {
             .as_ref()
             .and_then(|c| c.instance_groups.first())
             .map(|ig| ig.count as u32)
-            .unwrap_or(4);
+            .unwrap_or(default_concurrency);
 
         let versions = discover_versions(&model_dir);
         if versions.is_empty() {
@@ -207,6 +210,7 @@ pub async fn poll_loop(
     repo_path: PathBuf,
     pool: SessionPool,
     interval_secs: u64,
+    default_concurrency: u32,
     mut shutdown: watch::Receiver<bool>,
 ) {
     let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
@@ -215,7 +219,7 @@ pub async fn poll_loop(
     loop {
         tokio::select! {
             _ = interval.tick() => {
-                load_all_models(&repo_path, &pool).await;
+                load_all_models(&repo_path, &pool, default_concurrency).await;
                 metrics::set_models_count(pool.model_count() as i64);
             }
             _ = shutdown.changed() => {
