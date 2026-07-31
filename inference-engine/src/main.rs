@@ -199,14 +199,18 @@ fn main() -> anyhow::Result<()> {
     let inference_threads = if config.num_threads > 0 {
         config.num_threads
     } else {
-        num_cpus::get_physical()
+        std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
     };
 
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
+    let blocking_threads = inference_threads.max(4);
     let pool = SessionPool::new(inference_threads)?;
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(tokio_threads)
+        .max_blocking_threads(blocking_threads)
         .enable_all()
         .build()?;
 

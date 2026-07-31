@@ -32,17 +32,26 @@ fn model_key(name: &str, version: u32) -> String {
 #[derive(Clone)]
 pub struct SessionPool {
     sessions: Arc<DashMap<String, Arc<ModelSession>>>,
+    pub cpu_semaphore: Arc<Semaphore>,
 }
 
 impl SessionPool {
-    pub fn new(_num_threads: usize) -> anyhow::Result<Self> {
+    pub fn new(num_threads: usize) -> anyhow::Result<Self> {
+        let cpu_limit = if num_threads > 0 {
+            num_threads
+        } else {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(4)
+        };
         tracing::info!(
-            num_threads = _num_threads,
-            "session pool initialised (threading managed by ONNX Runtime)"
+            cpu_limit,
+            "session pool initialised (CPU semaphore + ONNX Runtime threading)"
         );
 
         Ok(Self {
             sessions: Arc::new(DashMap::new()),
+            cpu_semaphore: Arc::new(Semaphore::new(cpu_limit)),
         })
     }
 

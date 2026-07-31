@@ -490,12 +490,28 @@ async fn run_inference(
     req: InferRequest,
 ) -> Result<impl IntoResponse, StatusCode> {
     let request_start = Instant::now();
+    let deadline = state.inference_timeout;
     tracing::debug!(model = %model_name, "inference request received");
 
     let queue_start = Instant::now();
-    let _permit = match tokio::time::timeout(
-        state.inference_timeout,
-        session.concurrency().acquire(),
+    let model_permit = match session.concurrency().clone().try_acquire_owned() {
+        Ok(p) => p,
+        Err(_) => {
+            metrics::record_request(&model_name, "429");
+            return Err(StatusCode::TOO_MANY_REQUESTS);
+        }
+    };
+    metrics::record_queue_wait(&model_name, queue_start.elapsed().as_secs_f64());
+
+    let inputs = parse_http_inputs(&req.inputs).map_err(|e| {
+        tracing::warn!(error = %e, "bad request");
+        metrics::record_request(&model_name, "400");
+        StatusCode::BAD_REQUEST
+    })?;
+
+    let cpu_permit = match tokio::time::timeout(
+        deadline.saturating_sub(request_start.elapsed()),
+        state.pool.cpu_semaphore.clone().acquire_owned(),
     )
     .await
     {
@@ -505,46 +521,45 @@ async fn run_inference(
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
         Err(_) => {
-            tracing::warn!(model = %model_name, "semaphore wait timed out");
+            tracing::warn!(model = %model_name, "CPU admission timed out");
             metrics::record_request(&model_name, "503");
             return Err(StatusCode::SERVICE_UNAVAILABLE);
         }
     };
-    metrics::record_queue_wait(&model_name, queue_start.elapsed().as_secs_f64());
-    metrics::inc_inflight(&model_name);
 
-    let inputs = parse_http_inputs(&req.inputs).map_err(|e| {
-        tracing::warn!(error = %e, "bad request");
-        metrics::dec_inflight(&model_name);
-        metrics::record_request(&model_name, "400");
-        StatusCode::BAD_REQUEST
-    })?;
+    metrics::inc_inflight_compute(&model_name);
 
     let start = Instant::now();
     let runner = session.runner.clone();
-    let infer_handle = tokio::task::spawn_blocking(move || runner.run(inputs));
 
+    let infer_handle = tokio::task::spawn_blocking(move || {
+        let _model_guard = model_permit;
+        let _cpu_guard = cpu_permit;
+        runner.run(inputs)
+    });
+
+    let remaining = deadline.saturating_sub(request_start.elapsed());
     let outputs = tokio::select! {
         result = infer_handle => {
             match result {
                 Ok(Ok(out)) => out,
                 Ok(Err(e)) => {
-                    metrics::dec_inflight(&model_name);
+                    metrics::dec_inflight_compute(&model_name);
                     tracing::error!(error = %e, "inference failed");
                     metrics::record_request(&model_name, "500");
                     return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 }
                 Err(e) => {
-                    metrics::dec_inflight(&model_name);
+                    metrics::dec_inflight_compute(&model_name);
                     tracing::error!(error = %e, "spawn_blocking failed");
                     metrics::record_request(&model_name, "500");
                     return Err(StatusCode::INTERNAL_SERVER_ERROR);
                 }
             }
         }
-        _ = tokio::time::sleep(state.inference_timeout) => {
-            metrics::dec_inflight(&model_name);
-            tracing::warn!(model = %model_name, timeout_ms = state.inference_timeout.as_millis(), "inference timed out");
+        _ = tokio::time::sleep(remaining) => {
+            metrics::dec_inflight_compute(&model_name);
+            tracing::warn!(model = %model_name, timeout_ms = deadline.as_millis(), "inference timed out");
             metrics::record_request(&model_name, "504");
             return Err(StatusCode::GATEWAY_TIMEOUT);
         }
@@ -679,21 +694,34 @@ struct LoadRequest {
     version: Option<u32>,
 }
 
+fn validate_model_path(repo: &Path, name: &str, version: u32) -> Option<PathBuf> {
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0')
+    {
+        return None;
+    }
+    let resolved = repo.join(name).join(version.to_string()).join("model.onnx");
+    let canonical = resolved.canonicalize().ok()?;
+    let repo_canonical = repo.canonicalize().ok()?;
+    if !canonical.starts_with(&repo_canonical) {
+        return None;
+    }
+    Some(canonical)
+}
+
 async fn load_model(
     State(state): State<Arc<AppState>>,
     AxumPath(model_name): AxumPath<String>,
     body: Option<Json<LoadRequest>>,
 ) -> StatusCode {
     let version = body.and_then(|b| b.version).unwrap_or(1);
-    let model_file = state
-        .repo_path
-        .join(&model_name)
-        .join(version.to_string())
-        .join("model.onnx");
-
-    if !model_file.exists() {
-        return StatusCode::NOT_FOUND;
-    }
+    let model_file = match validate_model_path(&state.repo_path, &model_name, version) {
+        Some(p) => p,
+        None => return StatusCode::BAD_REQUEST,
+    };
 
     match state.pool.load_model(&model_name, version, &model_file, 4) {
         Ok(_) => {

@@ -15,6 +15,7 @@ static ACTIVE_MODELS: OnceLock<IntGauge> = OnceLock::new();
 static MODEL_INFO: OnceLock<IntGaugeVec> = OnceLock::new();
 static INFER_LATENCY: OnceLock<HistogramVec> = OnceLock::new();
 static INFLIGHT_REQUESTS: OnceLock<IntGaugeVec> = OnceLock::new();
+static INFLIGHT_COMPUTE: OnceLock<IntGaugeVec> = OnceLock::new();
 static QUEUE_WAIT_LATENCY: OnceLock<HistogramVec> = OnceLock::new();
 static MODEL_LOAD_DURATION: OnceLock<HistogramVec> = OnceLock::new();
 static MODEL_LOAD_ERRORS: OnceLock<IntCounterVec> = OnceLock::new();
@@ -81,6 +82,17 @@ fn registry() -> &'static Registry {
         .expect("valid descriptor");
         r.register(Box::new(inf.clone())).expect("unique name");
         INFLIGHT_REQUESTS.set(inf).ok();
+
+        let comp = IntGaugeVec::new(
+            prometheus::opts!(
+                "axon_inflight_compute",
+                "number of currently computing requests (holding CPU permit)"
+            ),
+            &["model"],
+        )
+        .expect("valid descriptor");
+        r.register(Box::new(comp.clone())).expect("unique name");
+        INFLIGHT_COMPUTE.set(comp).ok();
 
         // Queue/semaphore wait time
         let qw = HistogramVec::new(
@@ -177,6 +189,18 @@ pub fn inc_inflight(model: &str) {
 
 pub fn dec_inflight(model: &str) {
     if let Some(g) = INFLIGHT_REQUESTS.get() {
+        g.with_label_values(&[model]).dec();
+    }
+}
+
+pub fn inc_inflight_compute(model: &str) {
+    if let Some(g) = INFLIGHT_COMPUTE.get() {
+        g.with_label_values(&[model]).inc();
+    }
+}
+
+pub fn dec_inflight_compute(model: &str) {
+    if let Some(g) = INFLIGHT_COMPUTE.get() {
         g.with_label_values(&[model]).dec();
     }
 }

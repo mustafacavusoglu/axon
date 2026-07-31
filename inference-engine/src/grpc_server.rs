@@ -168,64 +168,81 @@ impl GrpcInferenceService for KfsService {
         })?;
 
         let request_start = Instant::now();
+        let deadline = self.inference_timeout;
         tracing::debug!(model = %req.model_name, "grpc inference request received");
 
         let queue_start = Instant::now();
-        let _permit =
-            match tokio::time::timeout(self.inference_timeout, session.concurrency().acquire())
-                .await
-            {
-                Ok(Ok(p)) => p,
-                Ok(Err(_)) => {
-                    metrics::record_request(&req.model_name, "503");
-                    return Err(Status::resource_exhausted("concurrency limit"));
-                }
-                Err(_) => {
-                    metrics::record_request(&req.model_name, "503");
-                    return Err(Status::resource_exhausted("queue wait timed out"));
-                }
-            };
+        let model_permit = match session.concurrency().clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                metrics::record_request(&req.model_name, "429");
+                return Err(Status::resource_exhausted("model concurrency limit"));
+            }
+        };
         metrics::record_queue_wait(&req.model_name, queue_start.elapsed().as_secs_f64());
-        metrics::inc_inflight(&req.model_name);
 
         let inputs = parse_grpc_inputs(&req.inputs).inspect_err(|_s| {
-            metrics::dec_inflight(&req.model_name);
             metrics::record_request(&req.model_name, "400");
         })?;
 
+        let cpu_permit = match tokio::time::timeout(
+            deadline.saturating_sub(request_start.elapsed()),
+            self.pool.cpu_semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(_)) => {
+                metrics::record_request(&req.model_name, "503");
+                return Err(Status::resource_exhausted("CPU admission failed"));
+            }
+            Err(_) => {
+                metrics::record_request(&req.model_name, "503");
+                return Err(Status::resource_exhausted("CPU admission timed out"));
+            }
+        };
+
+        metrics::inc_inflight_compute(&req.model_name);
+
         let start = Instant::now();
         let runner = session.runner.clone();
-        let infer_handle = tokio::task::spawn_blocking(move || runner.run(inputs));
 
+        let infer_handle = tokio::task::spawn_blocking(move || {
+            let _model_guard = model_permit;
+            let _cpu_guard = cpu_permit;
+            runner.run(inputs)
+        });
+
+        let remaining = deadline.saturating_sub(request_start.elapsed());
         let outputs = tokio::select! {
             result = infer_handle => {
                 match result {
                     Ok(Ok(out)) => out,
                     Ok(Err(e)) => {
-                        metrics::dec_inflight(&req.model_name);
+                        metrics::dec_inflight_compute(&req.model_name);
                         metrics::record_request(&req.model_name, "500");
                         return Err(Status::internal(format!("inference error: {e}")));
                     }
                     Err(e) => {
-                        metrics::dec_inflight(&req.model_name);
+                        metrics::dec_inflight_compute(&req.model_name);
                         metrics::record_request(&req.model_name, "500");
                         return Err(Status::internal(format!("task join error: {e}")));
                     }
                 }
             }
-            _ = tokio::time::sleep(self.inference_timeout) => {
-                metrics::dec_inflight(&req.model_name);
+            _ = tokio::time::sleep(remaining) => {
+                metrics::dec_inflight_compute(&req.model_name);
                 metrics::record_request(&req.model_name, "504");
                 return Err(Status::deadline_exceeded(format!(
                     "inference timed out after {}ms",
-                    self.inference_timeout.as_millis()
+                    deadline.as_millis()
                 )));
             }
         };
 
         let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
         let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
-        metrics::dec_inflight(&req.model_name);
+        metrics::dec_inflight_compute(&req.model_name);
         metrics::record_request(&req.model_name, "200");
         metrics::record_latency(&req.model_name, latency_ms);
         tracing::info!(model = %req.model_name, latency_ms = format!("{latency_ms:.2}"), total_ms = format!("{total_ms:.2}"), "inference completed");
