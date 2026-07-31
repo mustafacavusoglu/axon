@@ -367,9 +367,20 @@ async fn run_batch_inference(
     }
 
     let batch_start = Instant::now();
+    let batch_deadline = batch_start + state.inference_timeout;
     let mut responses = Vec::with_capacity(req.requests.len());
 
     for (index, single_req) in req.requests.into_iter().enumerate() {
+        if Instant::now() > batch_deadline {
+            for remaining in index..responses.capacity() {
+                responses.push(BatchInferItem {
+                    index: remaining,
+                    outputs: None,
+                    error: Some("batch deadline exceeded".to_string()),
+                });
+            }
+            break;
+        }
         let inputs = match parse_http_inputs(&single_req.inputs) {
             Ok(i) => i,
             Err(e) => {
@@ -382,30 +393,50 @@ async fn run_batch_inference(
             }
         };
 
-        let _permit =
-            match tokio::time::timeout(state.inference_timeout, session.concurrency().acquire())
-                .await
-            {
-                Ok(Ok(p)) => p,
-                _ => {
-                    responses.push(BatchInferItem {
-                        index,
-                        outputs: None,
-                        error: Some("service unavailable".to_string()),
-                    });
-                    continue;
-                }
-            };
-        metrics::inc_inflight(&model_name);
+        let model_permit = match session.concurrency().clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                responses.push(BatchInferItem {
+                    index,
+                    outputs: None,
+                    error: Some("model concurrency limit".to_string()),
+                });
+                continue;
+            }
+        };
+
+        let cpu_permit = match tokio::time::timeout(
+            batch_deadline.saturating_duration_since(Instant::now()),
+            state.pool.cpu_semaphore.clone().acquire_owned(),
+        )
+        .await
+        {
+            Ok(Ok(p)) => p,
+            _ => {
+                responses.push(BatchInferItem {
+                    index,
+                    outputs: None,
+                    error: Some("CPU admission failed".to_string()),
+                });
+                continue;
+            }
+        };
+
+        metrics::inc_inflight_compute(&model_name);
 
         let runner = session.runner.clone();
-        let infer_handle = tokio::task::spawn_blocking(move || runner.run(inputs));
+        let infer_handle = tokio::task::spawn_blocking(move || {
+            let _model_guard = model_permit;
+            let _cpu_guard = cpu_permit;
+            runner.run(inputs)
+        });
 
+        let item_remaining = batch_deadline.saturating_duration_since(Instant::now());
         tokio::select! {
             result = infer_handle => {
                 match result {
                     Ok(Ok(out)) => {
-                        metrics::dec_inflight(&model_name);
+                        metrics::dec_inflight_compute(&model_name);
                         let outputs: Vec<InferOutputResponse> = out
                             .into_iter()
                             .map(|(name, shape, tensor_data)| {
@@ -441,7 +472,7 @@ async fn run_batch_inference(
                         });
                     }
                     Ok(Err(e)) => {
-                        metrics::dec_inflight(&model_name);
+                        metrics::dec_inflight_compute(&model_name);
                         responses.push(BatchInferItem {
                             index,
                             outputs: None,
@@ -449,7 +480,7 @@ async fn run_batch_inference(
                         });
                     }
                     Err(e) => {
-                        metrics::dec_inflight(&model_name);
+                        metrics::dec_inflight_compute(&model_name);
                         responses.push(BatchInferItem {
                             index,
                             outputs: None,
@@ -458,8 +489,8 @@ async fn run_batch_inference(
                     }
                 }
             }
-            _ = tokio::time::sleep(state.inference_timeout) => {
-                metrics::dec_inflight(&model_name);
+            _ = tokio::time::sleep(item_remaining) => {
+                metrics::dec_inflight_compute(&model_name);
                 responses.push(BatchInferItem {
                     index,
                     outputs: None,
@@ -632,17 +663,41 @@ fn parse_http_inputs(inputs: &[InferInputRequest]) -> anyhow::Result<Vec<(String
         let tensor = match inp.datatype.as_str() {
             "FP32" | "FLOAT32" => {
                 let data = extract_f64_array(&inp.data, total)?;
-                let floats: Vec<f32> = data.into_iter().map(|v| v as f32).collect();
+                let floats: Vec<f32> = data
+                    .into_iter()
+                    .map(|v| {
+                        if v.is_infinite() || v.is_nan() {
+                            anyhow::bail!("invalid FP32 value: {v}");
+                        }
+                        Ok(v as f32)
+                    })
+                    .collect::<anyhow::Result<_>>()?;
                 InputTensor::F32(floats, shape)
             }
             "INT32" => {
                 let data = extract_f64_array(&inp.data, total)?;
-                let ints: Vec<i32> = data.into_iter().map(|v| v as i32).collect();
+                let ints: Vec<i32> = data
+                    .into_iter()
+                    .map(|v| {
+                        if v < i32::MIN as f64 || v > i32::MAX as f64 || v.fract() != 0.0 {
+                            anyhow::bail!("value {v} out of INT32 range");
+                        }
+                        Ok(v as i32)
+                    })
+                    .collect::<anyhow::Result<_>>()?;
                 InputTensor::I32(ints, shape)
             }
             "INT64" => {
                 let data = extract_f64_array(&inp.data, total)?;
-                let ints: Vec<i64> = data.into_iter().map(|v| v as i64).collect();
+                let ints: Vec<i64> = data
+                    .into_iter()
+                    .map(|v| {
+                        if v < i64::MIN as f64 || v > i64::MAX as f64 || v.fract() != 0.0 {
+                            anyhow::bail!("value {v} out of INT64 range");
+                        }
+                        Ok(v as i64)
+                    })
+                    .collect::<anyhow::Result<_>>()?;
                 InputTensor::I64(ints, shape)
             }
             "BYTES" | "STRING" => {

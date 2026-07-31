@@ -114,6 +114,11 @@ impl RhaiRunner {
         let _script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
         let mut engine = Engine::new();
+        engine.set_max_operations(1_000_000);
+        engine.set_max_call_levels(32);
+        engine.set_max_string_size(1024 * 1024);
+        engine.set_max_array_size(100_000);
+        engine.set_max_map_size(100_000);
 
         engine.register_type::<RhaiTensor>();
 

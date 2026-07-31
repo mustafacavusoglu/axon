@@ -181,6 +181,7 @@ pub fn record_latency(model: &str, ms: f64) {
     }
 }
 
+#[allow(dead_code)]
 pub fn inc_inflight(model: &str) {
     if let Some(g) = INFLIGHT_REQUESTS.get() {
         g.with_label_values(&[model]).inc();

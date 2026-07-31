@@ -73,6 +73,5 @@ spec:
               readOnly: true
       volumes:
         - name: models
-          hostPath:
-            path: /data/models
-            type: Directory
+          persistentVolumeClaim:
+            claimName: model-store-pvc

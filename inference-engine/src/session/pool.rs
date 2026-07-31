@@ -17,6 +17,7 @@ pub struct ModelSession {
     pub version: u32,
     pub state: SessionState,
     pub runner: Arc<ModelRunner>,
+    pub file_mtime: Option<std::time::SystemTime>,
 }
 
 impl ModelSession {
@@ -63,10 +64,17 @@ impl SessionPool {
         concurrency: u32,
     ) -> anyhow::Result<Arc<ModelSession>> {
         let key = model_key(name, version);
+        let current_mtime = std::fs::metadata(model_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
 
         if let Some(existing) = self.sessions.get(&key) {
             if existing.state == SessionState::Ready {
-                tracing::info!(name, version, "model already loaded, reloading");
+                if existing.file_mtime == current_mtime {
+                    tracing::debug!(name, version, "model unchanged, reusing session");
+                    return Ok(existing.clone());
+                }
+                tracing::info!(name, version, "model changed, reloading");
             }
             self.sessions.remove(&key);
         }
@@ -88,6 +96,7 @@ impl SessionPool {
             version,
             state: SessionState::Ready,
             runner: Arc::new(runner),
+            file_mtime: current_mtime,
         });
 
         self.sessions.insert(key, session.clone());
@@ -122,12 +131,16 @@ impl SessionPool {
         };
 
         let runner = ModelRunner::load_rhai(script_path, self.clone(), count)?;
+        let st_mtime = std::fs::metadata(script_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
 
         let session = Arc::new(ModelSession {
             name: name.to_string(),
             version,
             state: SessionState::Ready,
             runner: Arc::new(runner),
+            file_mtime: st_mtime,
         });
 
         self.sessions.insert(key, session.clone());
@@ -164,6 +177,7 @@ impl SessionPool {
             version,
             state: SessionState::Ready,
             runner: Arc::new(runner),
+            file_mtime: None,
         });
 
         self.sessions.insert(key, session.clone());
