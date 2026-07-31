@@ -16,8 +16,17 @@ spec:
     spec:
       containers:
         - name: axon-server
-          image: mustdo12/axon-server:0.2.0
+          image: mustafa12/axon:0.3.5
           imagePullPolicy: IfNotPresent
+          securityContext:
+            runAsNonRoot: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+            seccompProfile:
+              type: RuntimeDefault
+            readOnlyRootFilesystem: true
           ports:
             - containerPort: 8000
               name: http

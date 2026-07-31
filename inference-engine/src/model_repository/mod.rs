@@ -72,8 +72,18 @@ fn load_all_models_sync(repo_path: &Path, pool: &SessionPool, default_concurrenc
         let concurrency = config
             .as_ref()
             .and_then(|c| c.instance_groups.first())
-            .map(|ig| ig.count as u32)
+            .map(|ig| {
+                if ig.count < 1 {
+                    1
+                } else if ig.count > 1024 {
+                    1024
+                } else {
+                    ig.count as u32
+                }
+            })
             .unwrap_or(default_concurrency);
+
+        let concurrency = concurrency.clamp(1, 1024);
 
         let versions = discover_versions(&model_dir);
         if versions.is_empty() {

@@ -17,9 +17,9 @@ COPY inference-engine/src/ ./src/
 RUN cargo fetch
 RUN find /usr/local/cargo/registry/src -path '*/ort-2.0.0-rc.12/src/value/type.rs' \
     -exec sh -c 'sed -i "s/todo!();/return Err(crate::Error::new_with_code(crate::ErrorCode::GenericFailure, \"Map type not supported\"));/" "$1" && echo "patched $1"' _ {} \;
-RUN rm -rf target/release/.fingerprint/ort* target/release/deps/*ort* target/release/libonnx* && cargo build --release
+RUN rm -rf target/release/.fingerprint/ort* target/release/deps/*ort* target/release/libonnx* && cargo build --release --locked
 
-FROM debian:bookworm-slim AS runtime
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 LABEL org.opencontainers.image.title="axon" \
       org.opencontainers.image.source="https://github.com/mustafacavusoglu/axon" \
       maintainer="mustafa12"
@@ -52,6 +52,12 @@ RUN SERVER_MACHINE="$(od -An -tx2 -j18 -N2 /usr/local/bin/axon-server | tr -d ' 
     fi
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
+
+RUN useradd --create-home --shell /bin/bash axon && \
+    mkdir -p /models /tmp/logs/axon && \
+    chown -R axon:axon /models /tmp/logs/axon
+
+USER axon
 
 VOLUME ["/models"]
 EXPOSE 8000 8001 8002

@@ -18,6 +18,8 @@ use crate::session::types::InputTensor;
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BATCH_SIZE: usize = 128;
 const MAX_JSON_DEPTH: usize = 8;
+const MAX_DIM_SIZE: i64 = 1_000_000;
+const MAX_TENSOR_ELEMENTS: usize = 100_000_000;
 
 struct AppState {
     pool: SessionPool,
@@ -471,7 +473,7 @@ async fn run_batch_inference(
     tracing::info!(
         model = %model_name,
         batch = responses.len(),
-        total_ms = format!("{total_ms:.2}"),
+        total_ms = total_ms,
         "batch inference completed"
     );
 
@@ -570,7 +572,7 @@ async fn run_inference(
     metrics::dec_inflight(&model_name);
     metrics::record_request(&model_name, "200");
     metrics::record_latency(&model_name, latency_ms);
-    tracing::info!(model = %model_name, latency_ms = format!("{latency_ms:.2}"), total_ms = format!("{total_ms:.2}"), "inference completed");
+    tracing::info!(model = %model_name, latency_ms = latency_ms, total_ms = total_ms, "inference completed");
 
     let response_outputs: Vec<InferOutputResponse> = outputs
         .into_iter()
@@ -611,12 +613,21 @@ fn parse_http_inputs(inputs: &[InferInputRequest]) -> anyhow::Result<Vec<(String
     let mut result = Vec::with_capacity(inputs.len());
 
     for inp in inputs {
+        for &d in &inp.shape {
+            if d <= 0 || d > MAX_DIM_SIZE {
+                anyhow::bail!("dimension out of range: {d} (max {MAX_DIM_SIZE})");
+            }
+        }
         let shape: Vec<usize> = inp.shape.iter().map(|&d| d as usize).collect();
         let total: usize = shape
             .iter()
             .copied()
-            .reduce(|a, b| a.saturating_mul(b))
-            .unwrap_or(0);
+            .try_fold(1usize, |a, b| a.checked_mul(b))
+            .ok_or_else(|| anyhow::anyhow!("shape product overflow: {shape:?}"))?;
+
+        if total > MAX_TENSOR_ELEMENTS {
+            anyhow::bail!("tensor too large: {total} elements (max {MAX_TENSOR_ELEMENTS})");
+        }
 
         let tensor = match inp.datatype.as_str() {
             "FP32" | "FLOAT32" => {

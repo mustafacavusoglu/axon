@@ -245,7 +245,7 @@ impl GrpcInferenceService for KfsService {
         metrics::dec_inflight_compute(&req.model_name);
         metrics::record_request(&req.model_name, "200");
         metrics::record_latency(&req.model_name, latency_ms);
-        tracing::info!(model = %req.model_name, latency_ms = format!("{latency_ms:.2}"), total_ms = format!("{total_ms:.2}"), "inference completed");
+        tracing::info!(model = %req.model_name, latency_ms = latency_ms, total_ms = total_ms, "inference completed");
 
         let response_outputs: Vec<InferOutput> = outputs
             .into_iter()
