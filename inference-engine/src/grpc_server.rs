@@ -10,6 +10,8 @@ use crate::metrics;
 use crate::serving::{self, Admission, InferError, ServeContext, MAX_INPUTS};
 use crate::session::types::InputTensor;
 
+// Generated code; newer clippy flags tonic's async_trait output.
+#[allow(unknown_lints, clippy::double_must_use)]
 pub mod kfs {
     tonic::include_proto!("inference.kfs");
 }
@@ -250,8 +252,10 @@ fn decode_fixed<const N: usize, T>(
     }
     Ok(inp
         .raw_data
-        .chunks_exact(N)
-        .map(|c| from_le(c.try_into().expect("chunk has N bytes")))
+        .as_chunks::<N>()
+        .0
+        .iter()
+        .map(|c| from_le(*c))
         .collect())
 }
 

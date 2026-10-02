@@ -485,7 +485,9 @@ fn register_cv_functions(engine: &mut Engine) {
             expect_len("grayscale", pixels.len(), total.saturating_mul(3))?;
             let src: Vec<f64> = pixels.iter().map(to_f64).collect();
             Ok(src
-                .chunks_exact(3)
+                .as_chunks::<3>()
+                .0
+                .iter()
                 .map(|p| Dynamic::from(0.2989 * p[0] + 0.5870 * p[1] + 0.1140 * p[2]))
                 .collect())
         },
