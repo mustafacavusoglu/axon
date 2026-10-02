@@ -2,14 +2,51 @@ use std::sync::Arc;
 
 use once_cell::sync::Lazy;
 use parking_lot::Mutex as PLMutex;
-use rhai::{Dynamic, Engine};
+use rhai::{Dynamic, Engine, EvalAltResult};
 use tokenizers::Tokenizer;
+
+type RhaiResult<T> = Result<T, Box<EvalAltResult>>;
 
 static REGEX_CACHE: Lazy<PLMutex<std::collections::HashMap<String, Arc<regex::Regex>>>> =
     Lazy::new(|| PLMutex::new(std::collections::HashMap::new()));
 
 const MAX_IMAGE_BYTES: usize = 32 * 1024 * 1024;
 const MAX_IMAGE_PIXELS: u32 = 4096;
+/// Upper bound on arrays produced by builtins. Checked *before* allocating,
+/// since Rhai's own array-size limit is only enforced after a native function
+/// returns (too late to prevent an OOM abort).
+pub const MAX_BUILTIN_ELEMENTS: usize = 64 * 1024 * 1024;
+const MAX_NMS_BOXES: usize = 100_000;
+
+fn check_len(what: &str, n: usize) -> RhaiResult<()> {
+    if n > MAX_BUILTIN_ELEMENTS {
+        return Err(format!("{what}: {n} elements exceeds limit {MAX_BUILTIN_ELEMENTS}").into());
+    }
+    Ok(())
+}
+
+/// Converts non-negative `i64` dimensions to `usize` and returns their
+/// product, rejecting negative values and overflow.
+fn dims(what: &str, values: &[i64]) -> RhaiResult<(Vec<usize>, usize)> {
+    let mut out = Vec::with_capacity(values.len());
+    let mut product: usize = 1;
+    for &v in values {
+        let d = usize::try_from(v).map_err(|_| format!("{what}: negative dimension {v}"))?;
+        product = product
+            .checked_mul(d)
+            .ok_or_else(|| format!("{what}: dimensions overflow"))?;
+        out.push(d);
+    }
+    check_len(what, product)?;
+    Ok((out, product))
+}
+
+fn expect_len(what: &str, actual: usize, expected: usize) -> RhaiResult<()> {
+    if actual != expected {
+        return Err(format!("{what}: expected {expected} values, got {actual}").into());
+    }
+    Ok(())
+}
 
 fn to_f64(v: &Dynamic) -> f64 {
     if let Ok(f) = v.as_float() {
@@ -21,7 +58,7 @@ fn to_f64(v: &Dynamic) -> f64 {
     }
 }
 
-pub fn register_all(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tokenizer>>>) {
+pub fn register_all(engine: &mut Engine, tokenizer: Arc<Option<Tokenizer>>) {
     register_math_functions(engine);
     register_nlp_functions(engine, tokenizer);
     register_tabular_functions(engine);
@@ -70,6 +107,7 @@ fn register_math_functions(engine: &mut Engine) {
     });
 
     engine.register_fn("topk", |arr: rhai::Array, k: i64| -> rhai::Array {
+        // Partial selection would be faster, but arrays here are small.
         let mut indexed: Vec<(usize, f64)> = arr
             .iter()
             .enumerate()
@@ -104,18 +142,15 @@ fn register_math_functions(engine: &mut Engine) {
     );
 }
 
-fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tokenizer>>>) {
+fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<Option<Tokenizer>>) {
     engine.register_fn(
         "pad_sequence",
-        |arr: rhai::Array, target_len: i64, pad_value: i64| -> rhai::Array {
+        |arr: rhai::Array, target_len: i64, pad_value: i64| -> RhaiResult<rhai::Array> {
             let len = target_len.max(0) as usize;
-            if arr.len() >= len {
-                arr[..len].to_vec()
-            } else {
-                let mut result = arr;
-                result.resize(len, Dynamic::from(pad_value));
-                result
-            }
+            check_len("pad_sequence", len)?;
+            let mut result = arr;
+            result.resize(len, Dynamic::from(pad_value));
+            Ok(result)
         },
     );
 
@@ -149,11 +184,19 @@ fn register_nlp_functions(engine: &mut Engine, tokenizer: Arc<PLMutex<Option<Tok
     engine.register_fn(
         "decode_tokens",
         move |ids: rhai::Array| -> Result<String, Box<rhai::EvalAltResult>> {
-            let tok = tokenizer.lock();
-            let t = tok
+            let t = tokenizer
+                .as_ref()
                 .as_ref()
                 .ok_or_else(|| "tokenizer.json not loaded".to_string())?;
-            let token_ids: Vec<u32> = ids.iter().map(|v| v.as_int().unwrap_or(0) as u32).collect();
+            let token_ids: Vec<u32> = ids
+                .iter()
+                .map(|v| {
+                    v.as_int()
+                        .ok()
+                        .and_then(|i| u32::try_from(i).ok())
+                        .ok_or_else(|| format!("decode_tokens: invalid token id {v}"))
+                })
+                .collect::<Result<_, _>>()?;
             t.decode(&token_ids, true)
                 .map_err(|e| format!("decode failed: {e}").into())
         },
@@ -208,11 +251,15 @@ fn register_tabular_functions(engine: &mut Engine) {
         },
     );
 
-    engine.register_fn("one_hot", |index: i64, num_classes: i64| -> rhai::Array {
-        (0..num_classes)
-            .map(|i| Dynamic::from(if i == index { 1.0_f64 } else { 0.0_f64 }))
-            .collect()
-    });
+    engine.register_fn(
+        "one_hot",
+        |index: i64, num_classes: i64| -> RhaiResult<rhai::Array> {
+            check_len("one_hot", num_classes.max(0) as usize)?;
+            Ok((0..num_classes)
+                .map(|i| Dynamic::from(if i == index { 1.0_f64 } else { 0.0_f64 }))
+                .collect())
+        },
+    );
 
     engine.register_fn("label_encode", |value: &str, mapping: rhai::Map| -> i64 {
         mapping
@@ -261,44 +308,44 @@ fn register_tabular_functions(engine: &mut Engine) {
 }
 
 fn register_cv_functions(engine: &mut Engine) {
-    engine.register_fn(
-        "decode_image",
-        |data: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
-            use base64::Engine as B64Engine;
-            let bytes = base64::engine::general_purpose::STANDARD
-                .decode(data)
-                .map_err(|e| format!("base64 decode failed: {e}"))?;
-            if bytes.len() > MAX_IMAGE_BYTES {
-                return Err(format!(
-                    "image too large: {} bytes (max {})",
-                    bytes.len(),
-                    MAX_IMAGE_BYTES
-                )
-                .into());
-            }
-            let img =
-                image::load_from_memory(&bytes).map_err(|e| format!("image decode failed: {e}"))?;
-            let (w, h) = (img.width(), img.height());
-            if w > MAX_IMAGE_PIXELS || h > MAX_IMAGE_PIXELS {
-                return Err(format!(
-                    "image dimensions {w}x{h} exceed max {MAX_IMAGE_PIXELS}x{MAX_IMAGE_PIXELS}"
-                )
-                .into());
-            }
-            let rgb = img.to_rgb8();
-            let pixels: rhai::Array = rgb
-                .as_raw()
-                .iter()
-                .map(|&p| Dynamic::from(p as f64))
-                .collect();
-            let mut map = rhai::Map::new();
-            map.insert("pixels".into(), Dynamic::from(pixels));
-            map.insert("width".into(), Dynamic::from(w as i64));
-            map.insert("height".into(), Dynamic::from(h as i64));
-            map.insert("channels".into(), Dynamic::from(3_i64));
-            Ok(map)
-        },
-    );
+    engine.register_fn("decode_image", |data: &str| -> RhaiResult<rhai::Map> {
+        use base64::Engine as B64Engine;
+        // base64 expands by 4/3: reject before decoding anything.
+        if data.len() / 4 * 3 > MAX_IMAGE_BYTES {
+            return Err(format!("image too large (max {MAX_IMAGE_BYTES} bytes)").into());
+        }
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(data)
+            .map_err(|e| format!("base64 decode failed: {e}"))?;
+
+        // Enforce dimension/allocation limits *during* decoding so a small
+        // compressed "image bomb" cannot allocate gigabytes.
+        let mut limits = image::Limits::default();
+        limits.max_image_width = Some(MAX_IMAGE_PIXELS);
+        limits.max_image_height = Some(MAX_IMAGE_PIXELS);
+        limits.max_alloc = Some(256 * 1024 * 1024);
+        let mut reader = image::ImageReader::new(std::io::Cursor::new(bytes))
+            .with_guessed_format()
+            .map_err(|e| format!("image decode failed: {e}"))?;
+        reader.limits(limits);
+        let img = reader
+            .decode()
+            .map_err(|e| format!("image decode failed: {e}"))?;
+
+        let (w, h) = (img.width(), img.height());
+        let rgb = img.to_rgb8();
+        let pixels: rhai::Array = rgb
+            .as_raw()
+            .iter()
+            .map(|&p| Dynamic::from(p as f64))
+            .collect();
+        let mut map = rhai::Map::new();
+        map.insert("pixels".into(), Dynamic::from(pixels));
+        map.insert("width".into(), Dynamic::from(w as i64));
+        map.insert("height".into(), Dynamic::from(h as i64));
+        map.insert("channels".into(), Dynamic::from(3_i64));
+        Ok(map)
+    });
 
     engine.register_fn(
         "resize_image",
@@ -308,14 +355,17 @@ fn register_cv_functions(engine: &mut Engine) {
          dst_h: i64,
          dst_w: i64,
          channels: i64|
-         -> rhai::Array {
-            let sh = src_h as usize;
-            let sw = src_w as usize;
-            let dh = dst_h as usize;
-            let dw = dst_w as usize;
-            let ch = channels as usize;
+         -> RhaiResult<rhai::Array> {
+            let (src, src_len) = dims("resize_image", &[src_h, src_w, channels])?;
+            let (dst_dims, dst_len) = dims("resize_image", &[dst_h, dst_w, channels])?;
+            expect_len("resize_image", pixels.len(), src_len)?;
+            let (sh, sw, ch) = (src[0], src[1], src[2]);
+            let (dh, dw) = (dst_dims[0], dst_dims[1]);
+            if src_len == 0 {
+                return Ok(vec![Dynamic::from(0.0_f64); dst_len]);
+            }
             let src: Vec<f64> = pixels.iter().map(to_f64).collect();
-            let mut dst = vec![0.0f64; dh * dw * ch];
+            let mut dst = vec![0.0f64; dst_len];
             let scale_y = if dh > 1 {
                 (sh as f64 - 1.0) / (dh as f64 - 1.0)
             } else {
@@ -330,8 +380,8 @@ fn register_cv_functions(engine: &mut Engine) {
                 for x in 0..dw {
                     let sy = y as f64 * scale_y;
                     let sx = x as f64 * scale_x;
-                    let y0 = sy.floor() as usize;
-                    let x0 = sx.floor() as usize;
+                    let y0 = (sy.floor() as usize).min(sh - 1);
+                    let x0 = (sx.floor() as usize).min(sw - 1);
                     let y1 = (y0 + 1).min(sh - 1);
                     let x1 = (x0 + 1).min(sw - 1);
                     let fy = sy - y0 as f64;
@@ -348,17 +398,22 @@ fn register_cv_functions(engine: &mut Engine) {
                     }
                 }
             }
-            dst.into_iter().map(Dynamic::from).collect()
+            Ok(dst.into_iter().map(Dynamic::from).collect())
         },
     );
 
     engine.register_fn(
         "normalize_image",
-        |pixels: rhai::Array, mean: rhai::Array, std: rhai::Array| -> rhai::Array {
+        |pixels: rhai::Array, mean: rhai::Array, std: rhai::Array| -> RhaiResult<rhai::Array> {
             let mean_vals: Vec<f64> = mean.iter().map(to_f64).collect();
             let std_vals: Vec<f64> = std.iter().map(to_f64).collect();
             let ch = mean_vals.len();
-            pixels
+            if ch == 0 || std_vals.len() != ch {
+                return Err(
+                    "normalize_image: mean and std must be non-empty and equal length".into(),
+                );
+            }
+            Ok(pixels
                 .iter()
                 .enumerate()
                 .map(|(i, v)| {
@@ -366,18 +421,18 @@ fn register_cv_functions(engine: &mut Engine) {
                     let s = if std_vals[c] != 0.0 { std_vals[c] } else { 1.0 };
                     Dynamic::from((to_f64(v) - mean_vals[c]) / s)
                 })
-                .collect()
+                .collect())
         },
     );
 
     engine.register_fn(
         "image_to_chw",
-        |pixels: rhai::Array, h: i64, w: i64, c: i64| -> rhai::Array {
-            let height = h as usize;
-            let width = w as usize;
-            let channels = c as usize;
+        |pixels: rhai::Array, h: i64, w: i64, c: i64| -> RhaiResult<rhai::Array> {
+            let (d, total) = dims("image_to_chw", &[h, w, c])?;
+            expect_len("image_to_chw", pixels.len(), total)?;
+            let (height, width, channels) = (d[0], d[1], d[2]);
             let src: Vec<f64> = pixels.iter().map(to_f64).collect();
-            let mut dst = vec![0.0f64; height * width * channels];
+            let mut dst = vec![0.0f64; total];
             for y in 0..height {
                 for x in 0..width {
                     for ch in 0..channels {
@@ -386,7 +441,7 @@ fn register_cv_functions(engine: &mut Engine) {
                     }
                 }
             }
-            dst.into_iter().map(Dynamic::from).collect()
+            Ok(dst.into_iter().map(Dynamic::from).collect())
         },
     );
 
@@ -398,50 +453,54 @@ fn register_cv_functions(engine: &mut Engine) {
          crop_h: i64,
          crop_w: i64,
          channels: i64|
-         -> rhai::Array {
-            let sh = src_h as usize;
-            let sw = src_w as usize;
-            let ch_val = crop_h as usize;
-            let cw = crop_w as usize;
-            let c = channels as usize;
-            let start_y = (sh.saturating_sub(ch_val)) / 2;
-            let start_x = (sw.saturating_sub(cw)) / 2;
-            let src: Vec<f64> = pixels.iter().map(to_f64).collect();
-            let mut dst = Vec::with_capacity(ch_val * cw * c);
+         -> RhaiResult<rhai::Array> {
+            let (src, src_len) = dims("center_crop", &[src_h, src_w, channels])?;
+            let (crop, crop_len) = dims("center_crop", &[crop_h, crop_w, channels])?;
+            expect_len("center_crop", pixels.len(), src_len)?;
+            let (sh, sw, c) = (src[0], src[1], src[2]);
+            let (ch_val, cw) = (crop[0], crop[1]);
+            if ch_val > sh || cw > sw {
+                return Err(format!(
+                    "center_crop: crop {ch_val}x{cw} larger than source {sh}x{sw}"
+                )
+                .into());
+            }
+            let start_y = (sh - ch_val) / 2;
+            let start_x = (sw - cw) / 2;
+            let mut dst = Vec::with_capacity(crop_len);
             for y in 0..ch_val {
                 for x in 0..cw {
-                    let sy = start_y + y;
-                    let sx = start_x + x;
-                    for ch in 0..c {
-                        dst.push(src[(sy * sw + sx) * c + ch]);
-                    }
+                    let base = ((start_y + y) * sw + start_x + x) * c;
+                    dst.extend(pixels[base..base + c].iter().cloned());
                 }
             }
-            dst.into_iter().map(Dynamic::from).collect()
+            Ok(dst)
         },
     );
 
     engine.register_fn(
         "grayscale",
-        |pixels: rhai::Array, h: i64, w: i64| -> rhai::Array {
-            let height = h as usize;
-            let width = w as usize;
+        |pixels: rhai::Array, h: i64, w: i64| -> RhaiResult<rhai::Array> {
+            let (_, total) = dims("grayscale", &[h, w])?;
+            expect_len("grayscale", pixels.len(), total.saturating_mul(3))?;
             let src: Vec<f64> = pixels.iter().map(to_f64).collect();
-            let mut dst = Vec::with_capacity(height * width);
-            for i in 0..(height * width) {
-                let r = src[i * 3];
-                let g = src[i * 3 + 1];
-                let b = src[i * 3 + 2];
-                dst.push(0.2989 * r + 0.5870 * g + 0.1140 * b);
-            }
-            dst.into_iter().map(Dynamic::from).collect()
+            Ok(src
+                .as_chunks::<3>()
+                .0
+                .iter()
+                .map(|p| Dynamic::from(0.2989 * p[0] + 0.5870 * p[1] + 0.1140 * p[2]))
+                .collect())
         },
     );
 
     engine.register_fn(
         "nms",
-        |boxes: rhai::Array, scores: rhai::Array, iou_threshold: f64| -> rhai::Array {
+        |boxes: rhai::Array, scores: rhai::Array, iou_threshold: f64| -> RhaiResult<rhai::Array> {
             let n = scores.len();
+            expect_len("nms", boxes.len(), n)?;
+            if n > MAX_NMS_BOXES {
+                return Err(format!("nms: {n} boxes exceeds limit {MAX_NMS_BOXES}").into());
+            }
             let sc: Vec<f64> = scores.iter().map(to_f64).collect();
             let bx: Vec<[f64; 4]> = boxes
                 .iter()
@@ -465,24 +524,37 @@ fn register_cv_functions(engine: &mut Engine) {
             let mut keep: Vec<i64> = Vec::new();
             let mut suppressed = vec![false; n];
 
-            for &i in &indices {
+            for (pos, &i) in indices.iter().enumerate() {
                 if suppressed[i] {
                     continue;
                 }
                 keep.push(i as i64);
-                for &j in &indices {
-                    if suppressed[j] || j == i {
-                        continue;
-                    }
-                    let iou = compute_iou(&bx[i], &bx[j]);
-                    if iou >= iou_threshold {
+                // Only lower-scored boxes can be suppressed by box i.
+                for &j in &indices[pos + 1..] {
+                    if !suppressed[j] && compute_iou(&bx[i], &bx[j]) >= iou_threshold {
                         suppressed[j] = true;
                     }
                 }
             }
-            keep.into_iter().map(Dynamic::from).collect()
+            Ok(keep.into_iter().map(Dynamic::from).collect())
         },
     );
+}
+
+fn compute_iou(a: &[f64; 4], b: &[f64; 4]) -> f64 {
+    let x1 = a[0].max(b[0]);
+    let y1 = a[1].max(b[1]);
+    let x2 = a[2].min(b[2]);
+    let y2 = a[3].min(b[3]);
+    let inter = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
+    let area_a = (a[2] - a[0]) * (a[3] - a[1]);
+    let area_b = (b[2] - b[0]) * (b[3] - b[1]);
+    let union = area_a + area_b - inter;
+    if union <= 0.0 {
+        0.0
+    } else {
+        inter / union
+    }
 }
 
 #[cfg(test)]
@@ -491,7 +563,7 @@ mod tests {
 
     fn make_engine() -> Engine {
         let mut engine = Engine::new();
-        let tokenizer = Arc::new(PLMutex::new(None));
+        let tokenizer = Arc::new(None);
         register_all(&mut engine, tokenizer);
         engine
     }
@@ -830,20 +902,49 @@ mod tests {
         assert!(vals.contains(&2));
         assert!(!vals.contains(&1));
     }
-}
 
-fn compute_iou(a: &[f64; 4], b: &[f64; 4]) -> f64 {
-    let x1 = a[0].max(b[0]);
-    let y1 = a[1].max(b[1]);
-    let x2 = a[2].min(b[2]);
-    let y2 = a[3].min(b[3]);
-    let inter = (x2 - x1).max(0.0) * (y2 - y1).max(0.0);
-    let area_a = (a[2] - a[0]) * (a[3] - a[1]);
-    let area_b = (b[2] - b[0]) * (b[3] - b[1]);
-    let union = area_a + area_b - inter;
-    if union <= 0.0 {
-        0.0
-    } else {
-        inter / union
+    #[test]
+    fn test_builtins_reject_bad_arguments() {
+        let engine = make_engine();
+        for script in [
+            "resize_image([1.0, 2.0], 2, 2, 4, 4, 1)",
+            "resize_image([1.0], 1, 1, -4, 4, 1)",
+            "image_to_chw([1.0, 2.0, 3.0], 2, 2, 3)",
+            "center_crop([1.0, 2.0, 3.0, 4.0], 2, 2, 3, 3, 1)",
+            "grayscale([1.0, 2.0], 1, 1)",
+            "normalize_image([1.0], [], [])",
+            "nms([[0.0, 0.0, 1.0, 1.0]], [0.9, 0.8], 0.5)",
+            "one_hot(1, 999999999999)",
+            "pad_sequence([1], 999999999999, 0)",
+            "decode_tokens([1])",
+        ] {
+            assert!(
+                engine.eval::<Dynamic>(script).is_err(),
+                "{script} should fail"
+            );
+        }
+    }
+
+    #[test]
+    fn test_center_crop_odd_size() {
+        let engine = make_engine();
+        let result = engine
+            .eval::<rhai::Array>("center_crop([1, 2, 3, 4, 5, 6, 7, 8, 9], 3, 3, 1, 1, 1)")
+            .unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].as_int().unwrap(), 5);
+    }
+
+    #[test]
+    fn test_decode_image_rejects_oversized_dimensions() {
+        use base64::Engine as B64Engine;
+        let img = image::RgbImage::new(MAX_IMAGE_PIXELS + 1, 1);
+        let mut buf = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut buf, image::ImageFormat::Png).unwrap();
+        let b64 = base64::engine::general_purpose::STANDARD.encode(buf.into_inner());
+        let engine = make_engine();
+        assert!(engine
+            .eval::<rhai::Map>(&format!(r#"decode_image("{b64}")"#))
+            .is_err());
     }
 }

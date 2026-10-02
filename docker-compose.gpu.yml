@@ -1,0 +1,41 @@
+# GPU variant of docker-compose.turkish_safety.yml.
+# Requires the NVIDIA Container Toolkit on the host:
+#   docker compose -f docker-compose.gpu.yml up -d
+services:
+  axon-server-gpu:
+    image: mustafa12/axon:latest-gpu
+    build:
+      context: .
+      dockerfile: Dockerfile.inference-engine
+      target: runtime-gpu
+    ports:
+      - "8000:8000"
+      - "8001:8001"
+      - "8002:8002"
+    environment:
+      # auto = GPU when available, CPU otherwise; use cuda to fail fast.
+      AXON_DEVICE: "auto"
+      AXON_GPU_DEVICE_IDS: "0"
+      # AXON_API_KEY: "change-me"
+    volumes:
+      - ./models/axon_turkish_safety/turkish_safety_tokenizer:/models/turkish_safety_tokenizer:ro
+      - ./models/axon_turkish_safety/turkish_safety_model:/models/turkish_safety_model:ro
+      - ./models/axon_turkish_safety/turkish_safety_decoder:/models/turkish_safety_decoder:ro
+      - ./models/axon_turkish_safety/turkish_safety_pipeline:/models/turkish_safety_pipeline:ro
+      - gpu-logs:/tmp/logs/axon
+    command:
+      - "--model-repository=/models"
+      - "--model-control-mode=poll"
+      - "--log-level=info"
+      - "--inference-timeout-ms=60000"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    restart: unless-stopped
+
+volumes:
+  gpu-logs:

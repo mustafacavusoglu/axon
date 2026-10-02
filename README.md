@@ -1,8 +1,8 @@
-# Axon — CPU Inference Server
+# Axon — CPU & GPU Inference Server
 
 > [Türkçe dokümantasyon](README_TR.md) | [Wiki](https://github.com/mustafacavusoglu/axon/wiki)
 
-Single-binary, Triton-compatible, CPU-first model serving.  
+Single-binary, Triton-compatible model serving on CPU and NVIDIA GPUs (CUDA / TensorRT).  
 **Language:** Rust | **Runtime:** ONNX Runtime | **Transport:** gRPC + HTTP/REST (KServe v2)  
 **BLS/Scripting:** Rhai | **Config:** YAML + pbtxt | **Ensemble:** Declarative model chaining
 
@@ -11,6 +11,8 @@ Single-binary, Triton-compatible, CPU-first model serving.
 ## Features
 
 - **KServe v2 API** — HTTP + gRPC, full model management
+- **GPU Inference** — CUDA & TensorRT execution providers, per-model `KIND_GPU`/`KIND_CPU` placement, multi-GPU round-robin
+- **API Key Auth** — optional Bearer token on HTTP + gRPC (health probes stay open)
 - **Ensemble Pipelines** — Declarative multi-model chaining via config
 - **BLS (Rhai Scripting)** — Custom pre/post processing logic
 - **23 Builtin Functions** — ML, NLP, CV, tabular preprocessing/postprocessing
@@ -19,7 +21,7 @@ Single-binary, Triton-compatible, CPU-first model serving.
 - **Inference Timeout** — Configurable per-server timeout
 - **Circuit Breaker** — Auto-skip models that fail to load
 - **Prometheus Metrics** — Latency, throughput, inflight, queue wait
-- **Docker Multi-arch** — linux/amd64 + linux/arm64
+- **Docker Multi-arch** — linux/amd64 + linux/arm64, plus a CUDA image (`-gpu` tags)
 
 ---
 
@@ -75,8 +77,57 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
 
 ### 4. Docker
 ```bash
+# CPU
 docker compose -f docker-compose.turkish_safety.yml up -d
+
+# GPU (requires NVIDIA Container Toolkit)
+docker compose -f docker-compose.gpu.yml up -d
 ```
+
+| Image | Contents |
+|-------|----------|
+| `mustafa12/axon:<version>` / `latest` | CPU, ONNX Runtime 1.24.2 |
+| `mustafa12/axon:<version>-gpu` / `latest-gpu` | CUDA 12.8 + cuDNN 9, ONNX Runtime 1.24.2 GPU, `AXON_DEVICE=auto` |
+
+Build locally:
+```bash
+docker build -f Dockerfile.inference-engine -t axon:cpu .
+docker build -f Dockerfile.inference-engine --target runtime-gpu -t axon:gpu .
+# + TensorRT 10 (adds ~2 GB):
+docker build -f Dockerfile.inference-engine --target runtime-gpu \
+  --build-arg INSTALL_TENSORRT=true -t axon:gpu-trt .
+```
+
+---
+
+## GPU Inference
+
+```bash
+docker run --gpus all -v ./models:/models -p 8000:8000 \
+  mustafa12/axon:latest-gpu --model-repository=/models --device=cuda
+```
+
+`--device` (env `AXON_DEVICE`) sets the server default; each model can override
+it through `instance_group.kind` (Triton semantics):
+
+| `--device` | `KIND_AUTO` / no kind | `KIND_GPU` | `KIND_CPU` |
+|------------|-----------------------|------------|------------|
+| `cpu` (default) | CPU | CUDA (load fails without GPU) | CPU |
+| `auto` | CUDA, falls back to CPU | CUDA (load fails without GPU) | CPU |
+| `cuda` | CUDA (load fails without GPU) | CUDA | CPU |
+| `tensorrt` | TensorRT → CUDA → CPU per node | TensorRT | CPU |
+
+```protobuf
+instance_group [
+  { count: 2 kind: KIND_GPU gpus: [ 0, 1 ] }   # one instance per GPU
+]
+```
+
+- Instances are spread round-robin over `gpus` (or `--gpu-device-ids`), requests round-robin over instances.
+- Tree models (XGBoost/LightGBM/CatBoost/sklearn) gain little on GPU — keep them `KIND_CPU`.
+- Each instance owns its own copy of the weights in VRAM; size `count` accordingly or set `--gpu-mem-limit-mb`.
+- TensorRT: use `--trt-cache-dir` to persist built engines across restarts and `--trt-fp16` for FP16.
+- The effective device is shown in the startup table, logs and `GET /v2/models/{name}` (`"device": "cuda:0"`).
 
 ---
 
@@ -85,14 +136,23 @@ docker compose -f docker-compose.turkish_safety.yml up -d
 | Parameter | Default | Description |
 |-----------|---------|-------------|
 | `--model-repository` | `/models` | Path to model repository |
-| `--model-control-mode` | `none` | `none` or `poll` (auto-reload) |
+| `--model-control-mode` | `none` | `none`, `poll` (auto-reload) or `explicit` (load/unload API) |
 | `--repository-poll-secs` | `30` | Poll interval in seconds |
+| `--host` | `0.0.0.0` | Bind address (env `AXON_HOST`) |
 | `--http-port` | `8000` | HTTP REST port |
 | `--grpc-port` | `8001` | gRPC port |
 | `--metrics-port` | `8002` | Prometheus metrics port |
 | `--inference-timeout-ms` | `30000` | Max inference time before 504 |
 | `--num-threads` | `0` | Inference threads (0 = auto) |
 | `--concurrency-per-model` | `4` | Max concurrent requests per model |
+| `--device` | `cpu` | `cpu`, `auto`, `cuda`, `tensorrt` (env `AXON_DEVICE`) |
+| `--gpu-device-ids` | `0` | Comma separated GPU ids (env `AXON_GPU_DEVICE_IDS`) |
+| `--gpu-mem-limit-mb` | `0` | Per-instance GPU arena limit, 0 = unlimited |
+| `--trt-fp16` | off | Enable TensorRT FP16 |
+| `--trt-cache-dir` | — | TensorRT engine/timing cache directory |
+| `--intra-op-threads` | `1` | ONNX Runtime threads per instance |
+| `--model-load-timeout-secs` | auto | 10 s CPU, 120 s CUDA, 900 s TensorRT |
+| `--api-key` | — | Require `Authorization: Bearer <key>` (env `AXON_API_KEY`) |
 | `--log-level` | `info` | Log level: trace, debug, info, warn, error |
 | `--log-dir` | `/tmp/logs/axon` | Log directory (JSON, daily rotation) |
 
@@ -230,7 +290,7 @@ curl -s -X POST http://localhost:8000/v2/models/turkish_safety_pipeline/infer \
 - Dynamic batching — accumulate requests into batches per model
 - OpenVINO backend — Intel CPU optimization
 - Model warmup — pre-warm ONNX sessions on load
-- Authentication — API key + mTLS
+- mTLS
 - Binary tensor extension — raw bytes for large payloads
 - Rate limiting middleware
 - Model A/B traffic splitting

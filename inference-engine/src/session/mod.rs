@@ -1,3 +1,4 @@
+pub mod device;
 pub mod ensemble_runner;
 pub mod onnx_runner;
 pub mod pool;

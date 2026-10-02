@@ -3,8 +3,11 @@ mod grpc_server;
 mod http_server;
 mod metrics;
 mod model_repository;
+mod serving;
 mod session;
 
+use std::net::SocketAddr;
+use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
@@ -22,6 +25,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::Layer;
 
 use config::ServerConfig;
+use model_repository::Repository;
 use session::pool::SessionPool;
 
 struct LogGuards {
@@ -137,19 +141,19 @@ fn print_startup_table(config: &ServerConfig, pool: &SessionPool) {
     println!("  ║{:<width$}║", "  Endpoints", width = width);
     println!(
         "  ║{:<width$}║",
-        format!("    HTTP     http://0.0.0.0:{}", config.http_port),
+        format!("    HTTP     http://{}:{}", config.host, config.http_port),
         width = width
     );
     println!(
         "  ║{:<width$}║",
-        format!("    gRPC     0.0.0.0:{}", config.grpc_port),
+        format!("    gRPC     {}:{}", config.host, config.grpc_port),
         width = width
     );
     println!(
         "  ║{:<width$}║",
         format!(
-            "    Metrics  http://0.0.0.0:{}/metrics",
-            config.metrics_port
+            "    Metrics  http://{}:{}/metrics",
+            config.host, config.metrics_port
         ),
         width = width
     );
@@ -158,11 +162,16 @@ fn print_startup_table(config: &ServerConfig, pool: &SessionPool) {
         format!("    Logs     {}", config.log_dir.display()),
         width = width
     );
+    println!(
+        "  ║{:<width$}║",
+        format!("    Device   {:?}", config.device),
+        width = width
+    );
     println!("  ╠{}╣", "═".repeat(width));
     println!("  ║{:<width$}║", "  Models", width = width);
     println!(
         "  ║{:<width$}║",
-        "    Name                     Ver  Platform     Status",
+        "    Name                     Ver  Platform     Device",
         width = width
     );
     println!(
@@ -182,8 +191,11 @@ fn print_startup_table(config: &ServerConfig, pool: &SessionPool) {
                 .as_ref()
                 .map(|s| s.runner.platform_name())
                 .unwrap_or("unknown");
-            let status = "READY";
-            let line = format!("    {name:<25} {version:<4} {platform:<12} {status}");
+            let device = session
+                .as_ref()
+                .map(|s| s.runner.device_label())
+                .unwrap_or_default();
+            let line = format!("    {name:<25} {version:<4} {platform:<12} {device}");
             println!("  ║{line:<width$}║");
         }
     }
@@ -207,72 +219,78 @@ fn main() -> anyhow::Result<()> {
     let tokio_threads = (inference_threads / 2).clamp(2, 8);
     let blocking_threads = inference_threads.max(4);
     let pool = SessionPool::new(inference_threads)?;
+    let exec = config.execution_config();
+    tracing::info!(
+        target: "axon::console",
+        device = ?exec.default_device,
+        gpus = ?exec.gpu_device_ids,
+        "execution device configured"
+    );
+
+    let repo = Repository {
+        path: config.model_repository.clone(),
+        pool: pool.clone(),
+        default_concurrency: config.concurrency_per_model,
+        exec: Arc::new(exec),
+    };
 
     let rt = tokio::runtime::Builder::new_multi_thread()
         .worker_threads(tokio_threads)
         .max_blocking_threads(blocking_threads)
+        // Rhai BLS scripts and nested ensemble/BLS calls recurse on the
+        // blocking threads; the 2 MiB default is too tight.
+        .thread_stack_size(8 * 1024 * 1024)
         .enable_all()
         .build()?;
 
     rt.block_on(async move {
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
 
-        tracing::info!(
-            target: "axon::console",
-            "loading models from {}",
-            config.model_repository.display()
-        );
-
         metrics::init();
 
-        let http_handle = {
-            let http_pool = pool.clone();
-            let http_repo = config.model_repository.clone();
-            let timeout_ms = config.inference_timeout_ms;
-            let rx = shutdown_rx.clone();
-            tokio::spawn(http_server::serve(
-                config.http_port,
-                http_pool,
-                http_repo,
-                timeout_ms,
-                rx,
-            ))
+        let bind = |port: u16| -> anyhow::Result<SocketAddr> {
+            format!("{}:{port}", config.host)
+                .parse::<SocketAddr>()
+                .map_err(|e| anyhow::anyhow!("invalid bind address {}:{port}: {e}", config.host))
         };
+        let http_listener = tokio::net::TcpListener::bind(bind(config.http_port)?).await?;
+        let grpc_listener = tokio::net::TcpListener::bind(bind(config.grpc_port)?).await?;
+        let metrics_listener = tokio::net::TcpListener::bind(bind(config.metrics_port)?).await?;
 
-        let grpc_handle = {
-            let grpc_pool = pool.clone();
-            let grpc_repo = config.model_repository.clone();
-            let timeout_ms = config.inference_timeout_ms;
-            let rx = shutdown_rx.clone();
-            tokio::spawn(grpc_server::serve(
-                config.grpc_port,
-                grpc_pool,
-                grpc_repo,
-                timeout_ms,
-                rx,
-            ))
-        };
+        let ctx = Arc::new(serving::ServeContext {
+            repo: repo.clone(),
+            inference_timeout: Duration::from_millis(config.inference_timeout_ms),
+            api_key: config.api_key().map(Arc::from),
+            explicit_model_control: config.model_control_mode == "explicit",
+        });
+        if ctx.api_key.is_none() {
+            tracing::warn!(
+                target: "axon::console",
+                "no --api-key set: inference and model-control endpoints are unauthenticated"
+            );
+        }
 
-        let metrics_handle = {
-            let rx = shutdown_rx.clone();
-            tokio::spawn(metrics::serve_metrics(config.metrics_port, rx))
-        };
+        let http_handle = tokio::spawn(http_server::serve(
+            http_listener,
+            ctx.clone(),
+            shutdown_rx.clone(),
+        ));
+        let grpc_handle = tokio::spawn(grpc_server::serve(
+            grpc_listener,
+            ctx.clone(),
+            shutdown_rx.clone(),
+        ));
+        let metrics_handle = tokio::spawn(metrics::serve_metrics(
+            metrics_listener,
+            shutdown_rx.clone(),
+        ));
 
         let poll_handle = if config.model_control_mode == "poll" {
-            let poll_pool = pool.clone();
-            let poll_repo = config.model_repository.clone();
-            let poll_interval = config.repository_poll_secs;
-            let poll_shutdown = shutdown_rx.clone();
-            Some(tokio::spawn(async move {
-                model_repository::poll_loop(
-                    poll_repo,
-                    poll_pool,
-                    poll_interval,
-                    config.concurrency_per_model,
-                    poll_shutdown,
-                )
-                .await;
-            }))
+            Some(tokio::spawn(model_repository::poll_loop(
+                repo.clone(),
+                config.repository_poll_secs,
+                shutdown_rx.clone(),
+            )))
         } else {
             None
         };
@@ -283,14 +301,11 @@ fn main() -> anyhow::Result<()> {
             config.model_repository.display()
         );
 
-        let load_pool = pool.clone();
-        let load_repo = config.model_repository.clone();
+        let load_repo = repo.clone();
         let load_config = config.clone();
-        let default_concurrency = config.concurrency_per_model;
         tokio::spawn(async move {
-            model_repository::load_all_models(&load_repo, &load_pool, default_concurrency).await;
-            metrics::set_models_count(load_pool.model_count() as i64);
-            print_startup_table(&load_config, &load_pool);
+            load_repo.load_all(false).await;
+            print_startup_table(&load_config, &load_repo.pool);
         });
 
         #[cfg(unix)]
@@ -323,7 +338,8 @@ fn main() -> anyhow::Result<()> {
         let _ = tokio::time::timeout(Duration::from_secs(5), metrics_handle).await;
 
         tracing::info!(target: "axon::console", "axon-server stopped");
-    });
+        anyhow::Ok(())
+    })?;
 
     if let Some(p) = provider {
         let _ = p.shutdown();

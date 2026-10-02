@@ -63,9 +63,29 @@ pub struct TensorDef {
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct InstanceGroup {
+    /// Number of model instances; `<= 0` means "server default".
     #[serde(default = "default_count")]
     pub count: i32,
+    /// `KIND_CPU`, `KIND_GPU` or `KIND_AUTO` (default: follow `--device`).
+    #[serde(default = "default_kind")]
     pub kind: String,
+    /// GPU ids the instances are spread over (empty = `--gpu-device-ids`).
+    #[serde(default)]
+    pub gpus: Vec<i32>,
+}
+
+fn default_kind() -> String {
+    "KIND_AUTO".to_string()
+}
+
+impl InstanceGroup {
+    fn unset() -> Self {
+        Self {
+            count: 0,
+            kind: default_kind(),
+            gpus: Vec::new(),
+        }
+    }
 }
 
 fn default_count() -> i32 {
@@ -129,8 +149,130 @@ fn default_batch_size() -> i32 {
     1
 }
 
+/// Splits pbtxt text into tokens: quoted strings, `key:` names, bare values
+/// and the structural characters `{ } [ ] ,`. Comments are dropped.
+fn tokenize_pbtxt(text: &str) -> Vec<String> {
+    let mut tokens = Vec::new();
+    let mut cur = String::new();
+    let mut chars = text.chars().peekable();
+    let flush = |cur: &mut String, tokens: &mut Vec<String>| {
+        if !cur.is_empty() {
+            tokens.push(std::mem::take(cur));
+        }
+    };
+    while let Some(c) = chars.next() {
+        match c {
+            '"' | '\'' => {
+                flush(&mut cur, &mut tokens);
+                let mut quoted = String::from(c);
+                while let Some(q) = chars.next() {
+                    quoted.push(q);
+                    if q == '\\' {
+                        if let Some(esc) = chars.next() {
+                            quoted.push(esc);
+                        }
+                    } else if q == c {
+                        break;
+                    }
+                }
+                tokens.push(quoted);
+            }
+            '#' => {
+                flush(&mut cur, &mut tokens);
+                for n in chars.by_ref() {
+                    if n == '\n' {
+                        break;
+                    }
+                }
+            }
+            '{' | '}' | '[' | ']' | ',' => {
+                flush(&mut cur, &mut tokens);
+                tokens.push(c.to_string());
+            }
+            ':' => {
+                cur.push(':');
+                flush(&mut cur, &mut tokens);
+            }
+            c if c.is_whitespace() => flush(&mut cur, &mut tokens),
+            c => cur.push(c),
+        }
+    }
+    flush(&mut cur, &mut tokens);
+    tokens
+}
+
+/// Rewrites pbtxt into one statement per line so the line-oriented parser
+/// also accepts compact Triton configs such as
+/// `instance_group [{ count: 1 kind: KIND_CPU }]`.
+fn normalize_pbtxt(text: &str) -> String {
+    let tokens = tokenize_pbtxt(text);
+    let mut out = String::with_capacity(text.len() + 64);
+    let mut i = 0;
+    while i < tokens.len() {
+        let tok = tokens[i].as_str();
+        match tok {
+            "{" | "}" | "]" => {
+                out.push_str(tok);
+                out.push('\n');
+                i += 1;
+            }
+            "," | "[" => i += 1,
+            _ if tok.ends_with(':') && !tok.starts_with('"') => {
+                let key = &tok[..tok.len() - 1];
+                match tokens.get(i + 1).map(String::as_str) {
+                    Some("[") => {
+                        // Scalar list value, e.g. `dims: [1, -1]`, or a list of
+                        // messages (`key: [ { ... } ]`).
+                        if tokens.get(i + 2).map(String::as_str) == Some("{") {
+                            out.push_str(&format!("{key} [\n"));
+                            i += 2;
+                        } else {
+                            let mut j = i + 2;
+                            let mut items = Vec::new();
+                            while j < tokens.len() && tokens[j] != "]" {
+                                if tokens[j] != "," {
+                                    items.push(tokens[j].as_str());
+                                }
+                                j += 1;
+                            }
+                            out.push_str(&format!("{key}: [{}]\n", items.join(", ")));
+                            i = j + 1;
+                        }
+                    }
+                    Some("{") => {
+                        out.push_str(&format!("{key} {{\n"));
+                        i += 2;
+                    }
+                    Some(value) => {
+                        out.push_str(&format!("{key}: {value}\n"));
+                        i += 2;
+                    }
+                    None => i += 1,
+                }
+            }
+            _ => match tokens.get(i + 1).map(String::as_str) {
+                Some("{") => {
+                    out.push_str(&format!("{tok} {{\n"));
+                    i += 2;
+                }
+                Some("[") => {
+                    out.push_str(&format!("{tok} [\n"));
+                    i += 2;
+                }
+                _ => {
+                    out.push_str(tok);
+                    out.push('\n');
+                    i += 1;
+                }
+            },
+        }
+    }
+    out
+}
+
 pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
-    let text = std::str::from_utf8(content)?;
+    let normalized = normalize_pbtxt(std::str::from_utf8(content)?);
+    let text = normalized.as_str();
 
     let mut cfg = ModelConfig {
         name: String::new(),
@@ -162,6 +304,9 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
 
         if line == "{" {
             brace_depth += 1;
+            if current_section == "instance_group" && in_list {
+                cfg.instance_groups.push(InstanceGroup::unset());
+            }
             continue;
         }
         if line == "}" {
@@ -258,6 +403,9 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
                 in_list = line.ends_with('[');
                 in_list_stack.push(in_list);
                 section_start = true;
+                if *prefix == "instance_group" && !in_list {
+                    cfg.instance_groups.push(InstanceGroup::unset());
+                }
                 break;
             }
         }
@@ -347,17 +495,21 @@ pub fn parse_model_config(content: &[u8]) -> Result<ModelConfig> {
                 }
             }
             "instance_group" => {
+                if cfg.instance_groups.is_empty() {
+                    cfg.instance_groups.push(InstanceGroup::unset());
+                }
+                let last = cfg.instance_groups.last_mut().expect("group exists");
                 if let Some(val) = strip_field(line, "count:") {
                     if let Ok(v) = val.trim().parse::<i32>() {
-                        cfg.instance_groups.push(InstanceGroup {
-                            count: v.max(1),
-                            kind: "KIND_CPU".to_string(),
-                        });
+                        last.count = v.max(1);
                     }
                 } else if let Some(val) = strip_field(line, "kind:") {
-                    if let Some(last) = cfg.instance_groups.last_mut() {
-                        last.kind = unquote(val);
-                    }
+                    last.kind = unquote(val);
+                } else if let Some(val) = strip_field(line, "gpus:") {
+                    last.gpus = parse_num_list(val)
+                        .into_iter()
+                        .filter_map(|g| i32::try_from(g).ok().filter(|g| *g >= 0))
+                        .collect();
                 }
             }
             "dynamic_batching" => {
@@ -1205,5 +1357,94 @@ ensemble_scheduling {
         assert_eq!(ens.steps[0].output_map[1].key, "attention_mask");
         assert_eq!(ens.steps[1].input_map.len(), 2);
         assert_eq!(ens.steps[1].output_map.len(), 2);
+    }
+
+    #[test]
+    fn test_parse_instance_group_gpu_pbtxt() {
+        let content = br#"
+name: "gpu_model"
+platform: "onnxruntime_onnx"
+instance_group [
+  {
+    kind: KIND_GPU
+    count: 2
+    gpus: [ 0, 1 ]
+  },
+  {
+    count: 1
+    kind: KIND_CPU
+  }
+]
+"#;
+        let cfg = parse_model_config(content).unwrap();
+        assert_eq!(cfg.instance_groups.len(), 2);
+        assert_eq!(cfg.instance_groups[0].kind, "KIND_GPU");
+        assert_eq!(cfg.instance_groups[0].count, 2);
+        assert_eq!(cfg.instance_groups[0].gpus, vec![0, 1]);
+        assert_eq!(cfg.instance_groups[1].kind, "KIND_CPU");
+        assert_eq!(cfg.instance_groups[1].count, 1);
+    }
+
+    #[test]
+    fn test_parse_instance_group_kind_only_pbtxt() {
+        let content = br#"
+name: "m"
+instance_group {
+  kind: KIND_GPU
+}
+"#;
+        let cfg = parse_model_config(content).unwrap();
+        assert_eq!(cfg.instance_groups.len(), 1);
+        assert_eq!(cfg.instance_groups[0].kind, "KIND_GPU");
+        assert_eq!(cfg.instance_groups[0].count, 0);
+    }
+
+    #[test]
+    fn test_parse_instance_group_gpu_yaml() {
+        let content = br#"
+name: gpu_model
+instance_groups:
+  - count: 1
+    kind: KIND_GPU
+    gpus: [1]
+  - count: 3
+"#;
+        let cfg = parse_model_config_yaml(content).unwrap();
+        assert_eq!(cfg.instance_groups[0].gpus, vec![1]);
+        assert_eq!(cfg.instance_groups[1].kind, "KIND_AUTO");
+    }
+
+    #[test]
+    fn test_parse_inline_triton_style() {
+        let content = br#"
+name: "test_model"
+platform: "onnxruntime_onnx"
+max_batch_size: 1
+input [{ name: "x" data_type: TYPE_FP32 dims: [1] }]
+output [{ name: "y" data_type: TYPE_FP32 dims: [ -1, 2 ] }]  # trailing comment
+instance_group [{ count: 1 kind: KIND_CPU }]
+"#;
+        let cfg = parse_model_config(content).unwrap();
+        assert_eq!(cfg.name, "test_model");
+        assert_eq!(cfg.inputs.len(), 1);
+        assert_eq!(cfg.inputs[0].name, "x");
+        assert_eq!(cfg.inputs[0].dims, vec![1]);
+        assert_eq!(cfg.outputs[0].dims, vec![-1, 2]);
+        assert_eq!(cfg.instance_groups.len(), 1);
+        assert_eq!(cfg.instance_groups[0].count, 1);
+        assert_eq!(cfg.instance_groups[0].kind, "KIND_CPU");
+    }
+
+    #[test]
+    fn test_repository_configs_parse() {
+        let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../models");
+        for entry in std::fs::read_dir(repo).unwrap().flatten() {
+            let path = entry.path().join("config.pbtxt");
+            if path.exists() {
+                let cfg = parse_model_config(&std::fs::read(&path).unwrap())
+                    .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+                assert!(!cfg.name.is_empty());
+            }
+        }
     }
 }

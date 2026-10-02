@@ -1,0 +1,11 @@
+# Only inference-engine/, proto/ and docker-entrypoint.sh are needed.
+.git
+.github
+**/target
+models
+deploy
+docs
+local_models
+locals
+*.md
+docker-compose*.yml

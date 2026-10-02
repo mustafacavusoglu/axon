@@ -15,6 +15,7 @@ outputs:
     data_type: TYPE_FP32
     dims: [1, 7]
 
+# KIND_AUTO: CPU on a CPU server, GPU when started with --device=auto/cuda.
 instance_groups:
   - count: 1
-    kind: KIND_CPU
+    kind: KIND_AUTO
