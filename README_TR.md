@@ -1,8 +1,8 @@
-# Axon — CPU Inference Server
+# Axon — CPU & GPU Inference Server
 
 > [English documentation](README.md) | [Wiki](https://github.com/mustafacavusoglu/axon/wiki)
 
-Tek binary, Triton uyumlu, CPU öncelikli model sunum sistemi.  
+Tek binary, Triton uyumlu; CPU ve NVIDIA GPU (CUDA / TensorRT) üzerinde model sunum sistemi.  
 **Dil:** Rust | **Runtime:** ONNX Runtime | **İletişim:** gRPC + HTTP/REST (KServe v2)  
 **BLS/Scripting:** Rhai | **Config:** YAML + pbtxt | **Ensemble:** Declarative model zincirleme
 
@@ -11,6 +11,8 @@ Tek binary, Triton uyumlu, CPU öncelikli model sunum sistemi.
 ## Özellikler
 
 - **KServe v2 API** — HTTP + gRPC, tam model yönetimi
+- **GPU Inference** — CUDA ve TensorRT execution provider, model bazında `KIND_GPU`/`KIND_CPU` yerleşimi, çoklu GPU round-robin
+- **API Key Doğrulama** — HTTP + gRPC için opsiyonel Bearer token (health endpoint'leri açık kalır)
 - **Ensemble Pipeline** — Config ile declarative çok-model zincirleme
 - **BLS (Rhai Scripting)** — Özel pre/post processing mantığı
 - **23 Builtin Fonksiyon** — ML, NLP, CV, tabular preprocessing/postprocessing
@@ -19,7 +21,7 @@ Tek binary, Triton uyumlu, CPU öncelikli model sunum sistemi.
 - **Inference Timeout** — Sunucu bazında ayarlanabilir timeout
 - **Circuit Breaker** — Yüklenemeyen modelleri otomatik atlama
 - **Prometheus Metrikleri** — Gecikme, throughput, inflight, kuyruk bekleme
-- **Docker Multi-arch** — linux/amd64 + linux/arm64
+- **Docker Multi-arch** — linux/amd64 + linux/arm64, ayrıca CUDA imajı (`-gpu` tag'leri)
 
 ---
 
@@ -75,8 +77,57 @@ curl -s -X POST http://localhost:8000/v2/models/xgb_housing/infer \
 
 ### 4. Docker
 ```bash
+# CPU
 docker compose -f docker-compose.turkish_safety.yml up -d
+
+# GPU (NVIDIA Container Toolkit gerekir)
+docker compose -f docker-compose.gpu.yml up -d
 ```
+
+| İmaj | İçerik |
+|------|--------|
+| `mustafa12/axon:<versiyon>` / `latest` | CPU, ONNX Runtime 1.24.2 |
+| `mustafa12/axon:<versiyon>-gpu` / `latest-gpu` | CUDA 12.8 + cuDNN 9, ONNX Runtime 1.24.2 GPU, `AXON_DEVICE=auto` |
+
+Lokal build:
+```bash
+docker build -f Dockerfile.inference-engine -t axon:cpu .
+docker build -f Dockerfile.inference-engine --target runtime-gpu -t axon:gpu .
+# + TensorRT 10 (~2 GB ekler):
+docker build -f Dockerfile.inference-engine --target runtime-gpu \
+  --build-arg INSTALL_TENSORRT=true -t axon:gpu-trt .
+```
+
+---
+
+## GPU Inference
+
+```bash
+docker run --gpus all -v ./models:/models -p 8000:8000 \
+  mustafa12/axon:latest-gpu --model-repository=/models --device=cuda
+```
+
+`--device` (env `AXON_DEVICE`) sunucu varsayılanını belirler; her model
+`instance_group.kind` ile bunu ezebilir (Triton semantiği):
+
+| `--device` | `KIND_AUTO` / kind yok | `KIND_GPU` | `KIND_CPU` |
+|------------|------------------------|------------|------------|
+| `cpu` (varsayılan) | CPU | CUDA (GPU yoksa yükleme hata verir) | CPU |
+| `auto` | CUDA, yoksa CPU'ya düşer | CUDA (GPU yoksa yükleme hata verir) | CPU |
+| `cuda` | CUDA (GPU yoksa yükleme hata verir) | CUDA | CPU |
+| `tensorrt` | Node bazında TensorRT → CUDA → CPU | TensorRT | CPU |
+
+```protobuf
+instance_group [
+  { count: 2 kind: KIND_GPU gpus: [ 0, 1 ] }   # her GPU'ya bir instance
+]
+```
+
+- Instance'lar `gpus` (veya `--gpu-device-ids`) üzerine round-robin dağıtılır, istekler de instance'lar arasında round-robin.
+- Ağaç modelleri (XGBoost/LightGBM/CatBoost/sklearn) GPU'dan az kazanır — `KIND_CPU` bırakın.
+- Her instance ağırlıkların kendi kopyasını VRAM'de tutar; `count` değerini buna göre seçin veya `--gpu-mem-limit-mb` kullanın.
+- TensorRT: build edilen engine'leri restart'lar arasında saklamak için `--trt-cache-dir`, FP16 için `--trt-fp16`.
+- Modelin gerçekte çalıştığı cihaz başlangıç tablosunda, loglarda ve `GET /v2/models/{name}` cevabında (`"device": "cuda:0"`) görünür.
 
 ---
 
@@ -85,14 +136,23 @@ docker compose -f docker-compose.turkish_safety.yml up -d
 | Parametre | Varsayılan | Açıklama |
 |-----------|-----------|----------|
 | `--model-repository` | `/models` | Model deposu yolu |
-| `--model-control-mode` | `none` | `none` veya `poll` (otomatik yeniden yükleme) |
+| `--model-control-mode` | `none` | `none`, `poll` (otomatik yeniden yükleme) veya `explicit` (load/unload API) |
 | `--repository-poll-secs` | `30` | Tarama aralığı (saniye) |
+| `--host` | `0.0.0.0` | Bind adresi (env `AXON_HOST`) |
 | `--http-port` | `8000` | HTTP REST portu |
 | `--grpc-port` | `8001` | gRPC portu |
 | `--metrics-port` | `8002` | Prometheus metrik portu |
 | `--inference-timeout-ms` | `30000` | Maks inference süresi (504 döner) |
 | `--num-threads` | `0` | Inference thread sayısı (0 = otomatik) |
 | `--concurrency-per-model` | `4` | Model başına maks eşzamanlı istek |
+| `--device` | `cpu` | `cpu`, `auto`, `cuda`, `tensorrt` (env `AXON_DEVICE`) |
+| `--gpu-device-ids` | `0` | Virgülle ayrılmış GPU id'leri (env `AXON_GPU_DEVICE_IDS`) |
+| `--gpu-mem-limit-mb` | `0` | Instance başına GPU arena limiti, 0 = limitsiz |
+| `--trt-fp16` | kapalı | TensorRT FP16 |
+| `--trt-cache-dir` | — | TensorRT engine/timing cache dizini |
+| `--intra-op-threads` | `1` | Instance başına ONNX Runtime thread sayısı |
+| `--model-load-timeout-secs` | otomatik | CPU 10 sn, CUDA 120 sn, TensorRT 900 sn |
+| `--api-key` | — | `Authorization: Bearer <key>` zorunlu kılar (env `AXON_API_KEY`) |
 | `--log-level` | `info` | Log seviyesi: trace, debug, info, warn, error |
 | `--log-dir` | `/tmp/logs/axon` | Log dizini (JSON, günlük rotation) |
 
@@ -230,7 +290,7 @@ curl -s -X POST http://localhost:8000/v2/models/turkish_safety_pipeline/infer \
 - Dynamic batching — modele özel istekleri biriktirip toplu işleme
 - OpenVINO backend — Intel CPU optimizasyonu
 - Model warmup — ilk yüklemede ONNX oturumlarını ısıtma
-- Authentication — API key + mTLS
+- mTLS
 - Binary tensor extension — büyük veriler için raw bytes
 - Rate limiting middleware
 - Model A/B traffic splitting
