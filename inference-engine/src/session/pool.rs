@@ -1,5 +1,5 @@
-use std::path::Path;
 use std::sync::Arc;
+use std::time::SystemTime;
 
 use dashmap::DashMap;
 use tokio::sync::Semaphore;
@@ -17,7 +17,12 @@ pub struct ModelSession {
     pub version: u32,
     pub state: SessionState,
     pub runner: Arc<ModelRunner>,
-    pub file_mtime: Option<std::time::SystemTime>,
+    /// Parsed model config, cached at load time so metadata requests never
+    /// touch the filesystem.
+    pub config: Option<Arc<ModelConfig>>,
+    /// Change-detection fingerprint (newest mtime of the files the model was
+    /// built from). Used by the repository poller to skip unchanged models.
+    pub fingerprint: Option<SystemTime>,
 }
 
 impl ModelSession {
@@ -56,140 +61,45 @@ impl SessionPool {
         })
     }
 
-    pub fn load_model(
-        &self,
-        name: &str,
-        version: u32,
-        model_path: &Path,
-        concurrency: u32,
-    ) -> anyhow::Result<Arc<ModelSession>> {
+    /// Returns true when `name@version` is loaded and was built from files
+    /// with the given fingerprint, i.e. a reload would be a no-op.
+    pub fn is_current(&self, name: &str, version: u32, fingerprint: Option<SystemTime>) -> bool {
         let key = model_key(name, version);
-        let current_mtime = std::fs::metadata(model_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
-
-        if let Some(existing) = self.sessions.get(&key) {
-            if existing.state == SessionState::Ready {
-                if existing.file_mtime == current_mtime {
-                    tracing::debug!(name, version, "model unchanged, reusing session");
-                    return Ok(existing.clone());
-                }
-                tracing::info!(name, version, "model changed, reloading");
-            }
-            self.sessions.remove(&key);
-        }
-
-        if !model_path.exists() {
-            anyhow::bail!("model file not found: {}", model_path.display());
-        }
-
-        let count = if concurrency > 0 {
-            concurrency as usize
-        } else {
-            4
-        };
-
-        let runner = ModelRunner::load_onnx(model_path, count)?;
-
-        let session = Arc::new(ModelSession {
-            name: name.to_string(),
-            version,
-            state: SessionState::Ready,
-            runner: Arc::new(runner),
-            file_mtime: current_mtime,
-        });
-
-        self.sessions.insert(key, session.clone());
-        tracing::info!(target: "axon::console", name, version, instances = count, "model loaded");
-        Ok(session)
+        // Copy the value out so the shard guard is released immediately.
+        let existing = self.sessions.get(&key).map(|r| r.fingerprint);
+        matches!(existing, Some(fp) if fp.is_some() && fp == fingerprint)
     }
 
-    pub fn load_script_model(
+    /// Atomically publishes a freshly built runner. The previous session (if
+    /// any) keeps serving in-flight requests through its own `Arc` and is
+    /// dropped once they finish, so a reload never produces a 404 window and a
+    /// failed reload never removes a working model.
+    pub fn insert(
         &self,
         name: &str,
         version: u32,
-        script_path: &Path,
-        concurrency: u32,
-    ) -> anyhow::Result<Arc<ModelSession>> {
-        let key = model_key(name, version);
-
-        if let Some(existing) = self.sessions.get(&key) {
-            if existing.state == SessionState::Ready {
-                tracing::info!(name, version, "script model already loaded, reloading");
-            }
-            self.sessions.remove(&key);
-        }
-
-        if !script_path.exists() {
-            anyhow::bail!("script file not found: {}", script_path.display());
-        }
-
-        let count = if concurrency > 0 {
-            concurrency as usize
-        } else {
-            4
-        };
-
-        let runner = ModelRunner::load_rhai(script_path, self.clone(), count)?;
-        let st_mtime = std::fs::metadata(script_path)
-            .ok()
-            .and_then(|m| m.modified().ok());
-
+        runner: ModelRunner,
+        config: Option<Arc<ModelConfig>>,
+        fingerprint: Option<SystemTime>,
+    ) -> Arc<ModelSession> {
         let session = Arc::new(ModelSession {
             name: name.to_string(),
             version,
             state: SessionState::Ready,
             runner: Arc::new(runner),
-            file_mtime: st_mtime,
+            config,
+            fingerprint,
         });
-
-        self.sessions.insert(key, session.clone());
-        tracing::info!(target: "axon::console", name, version, instances = count, "script model loaded");
-        Ok(session)
-    }
-
-    pub fn load_ensemble_model(
-        &self,
-        name: &str,
-        version: u32,
-        config: &ModelConfig,
-        concurrency: u32,
-    ) -> anyhow::Result<Arc<ModelSession>> {
-        let key = model_key(name, version);
-
-        if let Some(existing) = self.sessions.get(&key) {
-            if existing.state == SessionState::Ready {
-                tracing::info!(name, version, "ensemble model already loaded, reloading");
-            }
-            self.sessions.remove(&key);
-        }
-
-        let count = if concurrency > 0 {
-            concurrency as usize
-        } else {
-            4
-        };
-
-        let runner = ModelRunner::load_ensemble(config, self.clone(), count)?;
-
-        let session = Arc::new(ModelSession {
-            name: name.to_string(),
-            version,
-            state: SessionState::Ready,
-            runner: Arc::new(runner),
-            file_mtime: None,
-        });
-
-        self.sessions.insert(key, session.clone());
-        tracing::info!(target: "axon::console", name, version, instances = count, "ensemble model loaded");
-        Ok(session)
+        self.sessions
+            .insert(model_key(name, version), session.clone());
+        session
     }
 
     pub fn unload_model(&self, name: &str, version: u32) -> anyhow::Result<()> {
         let key = model_key(name, version);
         match self.sessions.remove(&key) {
             Some(_) => {
-                tracing::info!(name, version, "model unloaded");
+                tracing::info!(target: "axon::console", name, version, "model unloaded");
                 Ok(())
             }
             None => anyhow::bail!("model not found: {key}"),
@@ -249,5 +159,51 @@ impl SessionPool {
         names.sort();
         names.dedup();
         names
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::session::runner::ModelRunner;
+
+    fn dummy_runner() -> ModelRunner {
+        ModelRunner::Noop(Arc::new(Semaphore::new(1)))
+    }
+
+    #[test]
+    fn reload_replaces_without_deadlock() {
+        let pool = SessionPool::new(1).unwrap();
+        let t0 = SystemTime::UNIX_EPOCH;
+        let t1 = t0 + std::time::Duration::from_secs(1);
+
+        pool.insert("m", 1, dummy_runner(), None, Some(t0));
+        assert!(pool.is_current("m", 1, Some(t0)));
+        assert!(!pool.is_current("m", 1, Some(t1)));
+
+        let old = pool.get("m", 1).unwrap();
+        pool.insert("m", 1, dummy_runner(), None, Some(t1));
+        let new = pool.get("m", 1).unwrap();
+        assert!(!Arc::ptr_eq(&old, &new));
+        assert_eq!(pool.model_count(), 1);
+    }
+
+    #[test]
+    fn missing_fingerprint_is_never_current() {
+        let pool = SessionPool::new(1).unwrap();
+        pool.insert("m", 1, dummy_runner(), None, None);
+        assert!(!pool.is_current("m", 1, None));
+    }
+
+    #[test]
+    fn latest_version_wins() {
+        let pool = SessionPool::new(1).unwrap();
+        pool.insert("m", 1, dummy_runner(), None, None);
+        pool.insert("m", 3, dummy_runner(), None, None);
+        pool.insert("m", 2, dummy_runner(), None, None);
+        assert_eq!(pool.get_latest("m").unwrap().version, 3);
+        assert_eq!(pool.get_versions("m"), vec![1, 2, 3]);
+        pool.unload_model("m", 3).unwrap();
+        assert_eq!(pool.get_latest("m").unwrap().version, 2);
     }
 }

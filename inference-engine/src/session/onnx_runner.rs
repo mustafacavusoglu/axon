@@ -1,5 +1,6 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 
 use ort::session::{builder::GraphOptimizationLevel, Session};
@@ -7,68 +8,114 @@ use ort::value::{Tensor, Value};
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 
+use super::device::{Device, ExecutionConfig, Placement};
 use super::types::{InferenceOutput, InputTensor, TensorData};
 
 pub struct OnnxRunner {
     sessions: Vec<Mutex<Session>>,
+    devices: Vec<Device>,
+    next: AtomicUsize,
     semaphore: Arc<Semaphore>,
-    #[allow(dead_code)]
-    model_path: PathBuf,
 }
 
 impl OnnxRunner {
-    pub fn load(model_path: &Path, concurrency: usize) -> anyhow::Result<Self> {
+    pub fn load(
+        model_path: &Path,
+        concurrency: usize,
+        exec: &ExecutionConfig,
+        placement: &Placement,
+    ) -> anyhow::Result<Self> {
         let count = concurrency.max(1);
-
-        // For large models with external data (e.g. BERT .onnx.data files) each
-        // session load reads the full weight file.  Create only 1 session up-front;
-        // additional sessions up to `count` are spun up lazily on first use.
-        // This prevents apparent hangs when count=4 and the model is hundreds of MB.
         tracing::info!(
             path = %model_path.display(),
             instances = count,
-            "loading ONNX model (1 of {} sessions, rest lazy)"  , count
+            device = ?placement.preference,
+            "loading ONNX model"
         );
-        let first = Self::create_session_with_timeout(model_path)?;
-        let mut sessions = Vec::with_capacity(count);
-        sessions.push(Mutex::new(first));
 
-        for i in 1..count {
-            tracing::debug!(path = %model_path.display(), session = i + 1, total = count, "loading additional ONNX session");
-            let s = Self::create_session_with_timeout(model_path)?;
-            sessions.push(Mutex::new(s));
+        let mut sessions = Vec::with_capacity(count);
+        let mut devices = Vec::with_capacity(count);
+        // Once a GPU instance fails under `--device=auto`, place the remaining
+        // instances on CPU too instead of paying the failure timeout again.
+        let mut cpu_fallback = false;
+
+        for i in 0..count {
+            let wanted = if cpu_fallback {
+                Device::Cpu
+            } else {
+                placement.device_for_instance(i)
+            };
+            let session = match Self::create_session_with_timeout(model_path, wanted, exec) {
+                Ok(s) => (s, wanted),
+                Err(e) if wanted.is_gpu() && placement.allows_cpu_fallback() => {
+                    tracing::warn!(
+                        target: "axon::console",
+                        path = %model_path.display(),
+                        device = %wanted,
+                        error = %e,
+                        "GPU session unavailable, falling back to CPU"
+                    );
+                    cpu_fallback = true;
+                    (
+                        Self::create_session_with_timeout(model_path, Device::Cpu, exec)?,
+                        Device::Cpu,
+                    )
+                }
+                Err(e) => return Err(e),
+            };
+            sessions.push(Mutex::new(session.0));
+            devices.push(session.1);
         }
 
-        tracing::info!(path = %model_path.display(), instances = count, "ONNX sessions created");
+        tracing::info!(
+            path = %model_path.display(),
+            instances = count,
+            devices = ?devices.iter().map(|d| d.to_string()).collect::<Vec<_>>(),
+            "ONNX sessions created"
+        );
 
         Ok(Self {
             sessions,
+            devices,
+            next: AtomicUsize::new(0),
             semaphore: Arc::new(Semaphore::new(count)),
-            model_path: model_path.to_path_buf(),
         })
     }
 
-    fn create_session_with_timeout(model_path: &Path) -> anyhow::Result<Session> {
-        use std::sync::mpsc;
-        use std::time::Duration;
+    /// Human readable placement, e.g. `cuda:0` or `cuda:0,cuda:1`.
+    pub fn device_label(&self) -> String {
+        let mut labels: Vec<String> = self.devices.iter().map(|d| d.to_string()).collect();
+        labels.dedup();
+        labels.join(",")
+    }
 
+    fn create_session_with_timeout(
+        model_path: &Path,
+        device: Device,
+        exec: &ExecutionConfig,
+    ) -> anyhow::Result<Session> {
+        use std::sync::mpsc;
+
+        let timeout = exec.load_timeout_for(device);
         let path = model_path.to_path_buf();
+        let thread_exec = exec.clone();
         let (tx, rx) = mpsc::channel();
 
-        std::thread::spawn(move || {
-            let result = Self::create_session(&path);
-            let _ = tx.send(result);
-        });
+        std::thread::Builder::new()
+            .name("axon-onnx-load".to_string())
+            .spawn(move || {
+                let result = Self::create_session(&path, device, &thread_exec);
+                let _ = tx.send(result);
+            })?;
 
-        match rx.recv_timeout(Duration::from_secs(10)) {
+        match rx.recv_timeout(timeout) {
             Ok(result) => result,
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                eprintln!(
-                    "[axon] TIMEOUT: create_session hung for 10s on {}",
-                    model_path.display()
-                );
+                // The loader thread cannot be cancelled; it finishes (or hangs)
+                // in the background and its result is dropped.
                 anyhow::bail!(
-                    "ONNX session load timed out after 10s: {}",
+                    "ONNX session load on {device} timed out after {}s: {}",
+                    timeout.as_secs(),
                     model_path.display()
                 )
             }
@@ -81,52 +128,35 @@ impl OnnxRunner {
         }
     }
 
-    fn create_session(model_path: &Path) -> anyhow::Result<Session> {
-        let has_external_data = model_path
-            .parent()
-            .map(|d| {
-                std::fs::read_dir(d)
-                    .ok()
-                    .map(|mut e| {
-                        e.any(|f| {
-                            f.ok()
-                                .and_then(|f| f.file_name().into_string().ok())
-                                .map(|n| n.ends_with(".onnx.data") || n.ends_with(".data"))
-                                .unwrap_or(false)
-                        })
-                    })
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
-
-        if has_external_data {
-            tracing::info!(
-                path = %model_path.display(),
-                "external data file detected — using Level0 optimization to avoid load hang"
-            );
-        }
-
-        let level = if has_external_data {
-            // Level0 = no optimization; large transformer models can hang for
-            // minutes at Level1+ during graph shape-inference over external data.
-            GraphOptimizationLevel::Level1
-        } else {
-            GraphOptimizationLevel::Level1
-        };
-
-        let builder = Session::builder()
+    fn create_session(
+        model_path: &Path,
+        device: Device,
+        exec: &ExecutionConfig,
+    ) -> anyhow::Result<Session> {
+        let mut builder = Session::builder()
             .map_err(|e| anyhow::anyhow!("failed to create session builder: {e}"))?;
+
+        let providers = exec.execution_providers(device);
+        if !providers.is_empty() {
+            builder = builder
+                .with_execution_providers(providers)
+                .map_err(|e| anyhow::anyhow!("failed to register {device} provider: {e}"))?;
+        }
 
         // External data (bert.onnx.data etc.) is resolved automatically by ONNX
         // Runtime relative to the directory of model_path — no extra config needed.
+        // Level1 only: higher levels have been observed to hang on AMD64.
         builder
-            .with_optimization_level(level)
+            .with_optimization_level(GraphOptimizationLevel::Level1)
             .map_err(|e| anyhow::anyhow!("failed to set optimization level: {e}"))?
-            .with_intra_threads(1)
+            .with_intra_threads(exec.intra_op_threads.max(1))
             .map_err(|e| anyhow::anyhow!("failed to set intra threads: {e}"))?
             .commit_from_file(model_path)
             .map_err(|e| {
-                anyhow::anyhow!("failed to load ONNX model {}: {}", model_path.display(), e)
+                anyhow::anyhow!(
+                    "failed to load ONNX model {} on {device}: {e}",
+                    model_path.display()
+                )
             })
     }
 
@@ -135,57 +165,43 @@ impl OnnxRunner {
     }
 
     pub fn run(&self, inputs: Vec<(String, InputTensor)>) -> anyhow::Result<InferenceOutput> {
-        let mut session_inputs: HashMap<String, Value> = HashMap::new();
+        let mut session_inputs: Vec<(String, Value)> = Vec::with_capacity(inputs.len());
 
         for (name, tensor) in inputs {
-            let value = match tensor {
-                InputTensor::F32(data, shape) => {
-                    let array =
-                        ndarray::ArrayD::<f32>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
-                    Value::from_array(array)
-                        .map_err(|e| anyhow::anyhow!("fp32 input '{name}': {e}"))?
-                        .into()
-                }
-                InputTensor::I32(data, shape) => {
-                    let array =
-                        ndarray::ArrayD::<i32>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
-                    Value::from_array(array)
-                        .map_err(|e| anyhow::anyhow!("int32 input '{name}': {e}"))?
-                        .into()
-                }
-                InputTensor::I64(data, shape) => {
-                    let array =
-                        ndarray::ArrayD::<i64>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
-                    Value::from_array(array)
-                        .map_err(|e| anyhow::anyhow!("int64 input '{name}': {e}"))?
-                        .into()
-                }
+            let value: Value = match tensor {
+                InputTensor::F32(data, shape) => Tensor::from_array((shape, data))
+                    .map_err(|e| anyhow::anyhow!("fp32 input '{name}': {e}"))?
+                    .into(),
+                InputTensor::I32(data, shape) => Tensor::from_array((shape, data))
+                    .map_err(|e| anyhow::anyhow!("int32 input '{name}': {e}"))?
+                    .into(),
+                InputTensor::I64(data, shape) => Tensor::from_array((shape, data))
+                    .map_err(|e| anyhow::anyhow!("int64 input '{name}': {e}"))?
+                    .into(),
                 InputTensor::String(data, shape) => {
                     let array =
                         ndarray::ArrayD::<String>::from_shape_vec(ndarray::IxDyn(&shape), data)?;
-                    let string_tensor: Value = Tensor::from_string_array(&array)
+                    Tensor::from_string_array(&array)
                         .map_err(|e| anyhow::anyhow!("string input '{name}': {e}"))?
-                        .into();
-                    string_tensor
+                        .into()
                 }
             };
-            session_inputs.insert(name, value);
+            session_inputs.push((name, value));
         }
 
-        let mut session_guard = None;
-        for s in &self.sessions {
-            if let Some(guard) = s.try_lock() {
-                session_guard = Some(guard);
-                break;
-            }
-        }
-        let mut session = session_guard.unwrap_or_else(|| self.sessions[0].lock());
+        // Start probing at a rotating offset so load spreads evenly across
+        // instances (and therefore across GPUs).
+        let n = self.sessions.len();
+        let start = self.next.fetch_add(1, Ordering::Relaxed) % n;
+        let mut session = (0..n)
+            .find_map(|i| self.sessions[(start + i) % n].try_lock())
+            .unwrap_or_else(|| self.sessions[start].lock());
 
         let outputs = session
             .run(session_inputs)
-            .map_err(|e| anyhow::anyhow!("inference failed: {e}"))?;
+            .map_err(|e| anyhow::anyhow!("onnxruntime: {e}"))?;
 
-        let mut results = Vec::new();
+        let mut results = Vec::with_capacity(outputs.len());
         for (name, value) in outputs.iter() {
             let (shape, data) = extract_output(name, &value)?;
             results.push((name.to_string(), shape, data));
@@ -200,16 +216,23 @@ fn extract_output(
     value: &ort::value::ValueRef<'_>,
 ) -> anyhow::Result<(Vec<i64>, TensorData)> {
     if let Ok((shape, data)) = value.try_extract_tensor::<f32>() {
-        let shape_i64: Vec<i64> = shape.iter().copied().collect();
-        return Ok((shape_i64, TensorData::F32(data.to_vec())));
+        return Ok((shape.to_vec(), TensorData::F32(data.to_vec())));
     }
     if let Ok((shape, data)) = value.try_extract_tensor::<i64>() {
-        let shape_i64: Vec<i64> = shape.iter().copied().collect();
-        return Ok((shape_i64, TensorData::I64(data.to_vec())));
+        return Ok((shape.to_vec(), TensorData::I64(data.to_vec())));
     }
     if let Ok((shape, data)) = value.try_extract_tensor::<i32>() {
-        let shape_i64: Vec<i64> = shape.iter().copied().collect();
-        return Ok((shape_i64, TensorData::I32(data.to_vec())));
+        return Ok((shape.to_vec(), TensorData::I32(data.to_vec())));
+    }
+    if let Ok((shape, data)) = value.try_extract_tensor::<f64>() {
+        // FP64 is not part of the public datatype set; narrow to FP32.
+        return Ok((
+            shape.to_vec(),
+            TensorData::F32(data.iter().map(|&v| v as f32).collect()),
+        ));
+    }
+    if let Ok((shape, data)) = value.try_extract_strings() {
+        return Ok((shape.to_vec(), TensorData::String(data)));
     }
 
     if let Ok(maps) = value.try_extract_sequence::<ort::value::DynValueTypeMarker>() {
@@ -223,6 +246,10 @@ fn extract_output(
     ))
 }
 
+/// Upper bound on the class dimension reconstructed from ZipMap outputs, so a
+/// model emitting a huge class id cannot trigger a giant allocation.
+const MAX_ZIPMAP_CLASSES: i64 = 1 << 20;
+
 fn extract_tree_sequence(
     name: &str,
     maps: &[ort::value::ValueRef<'_, ort::value::DynValueTypeMarker>],
@@ -231,32 +258,33 @@ fn extract_tree_sequence(
         return Err(anyhow::anyhow!("empty sequence output for '{name}'"));
     }
 
-    let first_map = &maps[0];
-    let probs: HashMap<i64, f32> = first_map
-        .try_extract_map::<i64, f32>()
-        .map_err(|e| anyhow::anyhow!("failed to extract map from '{name}': {e}"))?;
+    let rows: Vec<HashMap<i64, f32>> = maps
+        .iter()
+        .map(|m| {
+            m.try_extract_map::<i64, f32>()
+                .map_err(|e| anyhow::anyhow!("failed to extract map element from '{name}': {e}"))
+        })
+        .collect::<anyhow::Result<_>>()?;
 
-    let num_classes = probs.len();
-    let max_key = probs.keys().max().copied().unwrap_or(0);
-    let class_dim = (max_key + 1).max(num_classes as i64) as usize;
+    let max_key = rows
+        .iter()
+        .flat_map(|r| r.keys().copied())
+        .max()
+        .unwrap_or(0);
+    if max_key >= MAX_ZIPMAP_CLASSES {
+        anyhow::bail!("class id {max_key} in '{name}' exceeds {MAX_ZIPMAP_CLASSES}");
+    }
+    let class_dim = (max_key + 1).max(1) as usize;
 
-    let batch_size = maps.len();
-    let mut flat_probs = Vec::with_capacity(batch_size * class_dim);
-
-    for map_val in maps {
-        let class_map: HashMap<i64, f32> = map_val
-            .try_extract_map::<i64, f32>()
-            .map_err(|e| anyhow::anyhow!("failed to extract map element from '{name}': {e}"))?;
-
-        let mut row = vec![0.0f32; class_dim];
-        for (k, v) in class_map {
-            if k >= 0 && (k as usize) < class_dim {
-                row[k as usize] = v;
+    let mut flat_probs = vec![0.0f32; rows.len() * class_dim];
+    for (row_idx, row) in rows.into_iter().enumerate() {
+        for (k, v) in row {
+            if k >= 0 {
+                flat_probs[row_idx * class_dim + k as usize] = v;
             }
         }
-        flat_probs.extend(row);
     }
 
-    let shape = vec![batch_size as i64, class_dim as i64];
+    let shape = vec![maps.len() as i64, class_dim as i64];
     Ok((shape, TensorData::F32(flat_probs)))
 }

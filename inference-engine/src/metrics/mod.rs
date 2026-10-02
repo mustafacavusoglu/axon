@@ -158,7 +158,7 @@ pub fn init() {
     registry();
     START_TIME.get_or_init(Instant::now);
     if let Some(up) = UPTIME_SECONDS.get() {
-        up.with_label_values(&["0.3.0"]).set(1.0);
+        up.with_label_values(&[env!("CARGO_PKG_VERSION")]).set(1.0);
     }
 }
 
@@ -188,6 +188,7 @@ pub fn inc_inflight(model: &str) {
     }
 }
 
+#[allow(dead_code)]
 pub fn dec_inflight(model: &str) {
     if let Some(g) = INFLIGHT_REQUESTS.get() {
         g.with_label_values(&[model]).dec();
@@ -226,7 +227,6 @@ pub fn set_model_ready(model: &str, version: u32) {
     }
 }
 
-#[allow(dead_code)]
 pub fn clear_model(model: &str, version: u32) {
     if let Some(m) = MODEL_INFO.get() {
         m.with_label_values(&[model, &version.to_string()]).set(0);
@@ -267,14 +267,12 @@ async fn metrics_handler() -> String {
     metrics_text()
 }
 
-pub async fn serve_metrics(port: u16, mut shutdown: watch::Receiver<bool>) {
+pub async fn serve_metrics(listener: tokio::net::TcpListener, mut shutdown: watch::Receiver<bool>) {
     let app = Router::new().route("/metrics", get(metrics_handler));
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
-        .await
-        .expect("failed to bind metrics port");
-
-    tracing::info!(port, "metrics server listening");
+    if let Ok(addr) = listener.local_addr() {
+        tracing::info!(%addr, "metrics server listening");
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

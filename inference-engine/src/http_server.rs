@@ -1,54 +1,71 @@
-use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
-use axum::extract::{DefaultBodyLimit, Path as AxumPath, State};
-use axum::http::StatusCode;
-use axum::response::IntoResponse;
+use axum::extract::{DefaultBodyLimit, Path as AxumPath, Request, State};
+use axum::http::{header, StatusCode};
+use axum::middleware::{self, Next};
+use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::metrics;
-use crate::model_repository;
-use crate::session::pool::SessionPool;
-use crate::session::types::InputTensor;
+use crate::model_repository::config_parser::TensorDef;
+use crate::model_repository::is_valid_model_name;
+use crate::serving::{self, Admission, InferError, ServeContext, MAX_INPUTS};
+use crate::session::pool::ModelSession;
+use crate::session::types::{InferenceOutput, InputTensor, TensorData};
 
 const MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 const MAX_BATCH_SIZE: usize = 128;
 const MAX_JSON_DEPTH: usize = 8;
-const MAX_DIM_SIZE: i64 = 1_000_000;
-const MAX_TENSOR_ELEMENTS: usize = 100_000_000;
 
-struct AppState {
-    pool: SessionPool,
-    repo_path: PathBuf,
-    inference_timeout: std::time::Duration,
+type Ctx = State<Arc<ServeContext>>;
+
+/// JSON error body (`{"error": "..."}`), as used by KServe v2.
+struct ApiError(StatusCode, String);
+
+impl ApiError {
+    fn new(status: StatusCode, msg: impl Into<String>) -> Self {
+        ApiError(status, msg.into())
+    }
+}
+
+impl IntoResponse for ApiError {
+    fn into_response(self) -> Response {
+        (self.0, Json(serde_json::json!({ "error": self.1 }))).into_response()
+    }
+}
+
+impl From<InferError> for ApiError {
+    fn from(e: InferError) -> Self {
+        let status = match e {
+            InferError::Busy => StatusCode::TOO_MANY_REQUESTS,
+            InferError::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
+            InferError::Timeout(_) => StatusCode::GATEWAY_TIMEOUT,
+            InferError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        ApiError(status, e.to_string())
+    }
 }
 
 pub async fn serve(
-    port: u16,
-    pool: SessionPool,
-    repo_path: PathBuf,
-    inference_timeout_ms: u64,
+    listener: tokio::net::TcpListener,
+    ctx: Arc<ServeContext>,
     mut shutdown: watch::Receiver<bool>,
 ) {
-    let state = Arc::new(AppState {
-        pool,
-        repo_path,
-        inference_timeout: std::time::Duration::from_millis(inference_timeout_ms),
-    });
-
-    let app = Router::new()
-        .route("/v2/health/live", get(health_live))
-        .route("/v2/health/ready", get(health_ready))
+    let protected = Router::new()
         .route("/v2", get(server_metadata))
         .route("/v2/models", get(list_models))
         .route("/v2/models/{model_name}", get(model_metadata))
+        .route("/v2/models/{model_name}/ready", get(model_ready))
         .route(
             "/v2/models/{model_name}/versions/{version}",
             get(model_version_metadata),
+        )
+        .route(
+            "/v2/models/{model_name}/versions/{version}/ready",
+            get(model_version_ready),
         )
         .route("/v2/models/{model_name}/infer", post(infer))
         .route(
@@ -63,14 +80,19 @@ pub async fn serve(
         .route("/v2/models/{model_name}/load", post(load_model))
         .route("/v2/models/{model_name}/unload", post(unload_model))
         .route("/v2/repository/index", post(repository_index))
+        .route_layer(middleware::from_fn_with_state(ctx.clone(), require_api_key));
+
+    // Health endpoints stay unauthenticated for orchestrator probes.
+    let app = Router::new()
+        .route("/v2/health/live", get(health_live))
+        .route("/v2/health/ready", get(health_ready))
+        .merge(protected)
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
-        .with_state(state);
+        .with_state(ctx);
 
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
-        .await
-        .expect("failed to bind HTTP port");
-
-    tracing::info!(port, "HTTP server listening");
+    if let Ok(addr) = listener.local_addr() {
+        tracing::info!(%addr, "HTTP server listening");
+    }
 
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
@@ -80,12 +102,28 @@ pub async fn serve(
         .ok();
 }
 
+async fn require_api_key(State(ctx): Ctx, req: Request, next: Next) -> Response {
+    let auth = req
+        .headers()
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok());
+    if !ctx.authorized(auth) {
+        return (
+            StatusCode::UNAUTHORIZED,
+            [(header::WWW_AUTHENTICATE, "Bearer")],
+            Json(serde_json::json!({ "error": "unauthorized" })),
+        )
+            .into_response();
+    }
+    next.run(req).await
+}
+
 async fn health_live() -> Json<serde_json::Value> {
     Json(serde_json::json!({"live": true}))
 }
 
-async fn health_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    if state.pool.model_count() > 0 {
+async fn health_ready(State(ctx): Ctx) -> impl IntoResponse {
+    if ctx.pool().model_count() > 0 {
         (StatusCode::OK, Json(serde_json::json!({"ready": true})))
     } else {
         (
@@ -97,15 +135,15 @@ async fn health_ready(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 #[derive(Serialize)]
 struct ServerMetadataResponse {
-    name: String,
-    version: String,
+    name: &'static str,
+    version: &'static str,
     extensions: Vec<String>,
 }
 
 async fn server_metadata() -> Json<ServerMetadataResponse> {
     Json(ServerMetadataResponse {
-        name: "axon-server".to_string(),
-        version: "0.3.0".to_string(),
+        name: "axon-server",
+        version: env!("CARGO_PKG_VERSION"),
         extensions: vec![],
     })
 }
@@ -117,17 +155,19 @@ struct ModelEntry {
     state: String,
 }
 
-async fn list_models(State(state): State<Arc<AppState>>) -> Json<Vec<ModelEntry>> {
-    let models = state.pool.list_models();
-    let entries: Vec<ModelEntry> = models
-        .into_iter()
-        .map(|(name, version, st)| ModelEntry {
-            name,
-            version: version.to_string(),
-            state: format!("{st:?}"),
-        })
-        .collect();
-    Json(entries)
+async fn list_models(State(ctx): Ctx) -> Json<Vec<ModelEntry>> {
+    let mut models = ctx.pool().list_models();
+    models.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    Json(
+        models
+            .into_iter()
+            .map(|(name, version, st)| ModelEntry {
+                name,
+                version: version.to_string(),
+                state: format!("{st:?}"),
+            })
+            .collect(),
+    )
 }
 
 #[derive(Serialize)]
@@ -135,6 +175,7 @@ struct ModelMetadataResponse {
     name: String,
     versions: Vec<String>,
     platform: String,
+    device: String,
     inputs: Vec<TensorMetadataResponse>,
     outputs: Vec<TensorMetadataResponse>,
 }
@@ -146,103 +187,93 @@ struct TensorMetadataResponse {
     shape: Vec<i64>,
 }
 
-async fn model_metadata(
-    State(state): State<Arc<AppState>>,
-    AxumPath(model_name): AxumPath<String>,
-) -> Result<Json<ModelMetadataResponse>, StatusCode> {
-    let versions = state.pool.get_versions(&model_name);
-    if versions.is_empty() {
-        return Err(StatusCode::NOT_FOUND);
+fn tensor_metadata(defs: &[TensorDef]) -> Vec<TensorMetadataResponse> {
+    defs.iter()
+        .map(|t| TensorMetadataResponse {
+            name: t.name.clone(),
+            datatype: t.data_type.as_str().to_string(),
+            shape: t.dims.clone(),
+        })
+        .collect()
+}
+
+fn metadata_response(
+    name: String,
+    versions: Vec<String>,
+    session: &ModelSession,
+) -> ModelMetadataResponse {
+    let cfg = session.config.as_deref();
+    ModelMetadataResponse {
+        name,
+        versions,
+        platform: cfg
+            .map(|c| c.platform.clone())
+            .unwrap_or_else(|| "onnxruntime_onnx".to_string()),
+        device: session.runner.device_label(),
+        inputs: cfg.map(|c| tensor_metadata(&c.inputs)).unwrap_or_default(),
+        outputs: cfg.map(|c| tensor_metadata(&c.outputs)).unwrap_or_default(),
     }
+}
 
-    let config = load_config_for_model(&state.repo_path, &model_name);
+fn not_found(model: &str) -> ApiError {
+    ApiError::new(
+        StatusCode::NOT_FOUND,
+        format!("model '{model}' not found or not ready"),
+    )
+}
 
-    let (inputs, outputs) = match config {
-        Some(ref cfg) => {
-            let ins: Vec<TensorMetadataResponse> = cfg
-                .inputs
-                .iter()
-                .map(|t| TensorMetadataResponse {
-                    name: t.name.clone(),
-                    datatype: t.data_type.as_str().to_string(),
-                    shape: t.dims.clone(),
-                })
-                .collect();
-            let outs: Vec<TensorMetadataResponse> = cfg
-                .outputs
-                .iter()
-                .map(|t| TensorMetadataResponse {
-                    name: t.name.clone(),
-                    datatype: t.data_type.as_str().to_string(),
-                    shape: t.dims.clone(),
-                })
-                .collect();
-            (ins, outs)
-        }
-        None => (vec![], vec![]),
-    };
+fn parse_version(version: &str) -> Result<u32, ApiError> {
+    version
+        .parse()
+        .map_err(|_| ApiError::new(StatusCode::BAD_REQUEST, "invalid model version"))
+}
 
-    let platform = config
-        .as_ref()
-        .map(|c| c.platform.clone())
-        .unwrap_or_else(|| "onnxruntime_onnx".to_string());
-
-    Ok(Json(ModelMetadataResponse {
-        name: model_name,
-        versions: versions.iter().map(|v| v.to_string()).collect(),
-        platform,
-        inputs,
-        outputs,
-    }))
+async fn model_metadata(
+    State(ctx): Ctx,
+    AxumPath(model_name): AxumPath<String>,
+) -> Result<Json<ModelMetadataResponse>, ApiError> {
+    let session = ctx
+        .pool()
+        .get_latest(&model_name)
+        .ok_or_else(|| not_found(&model_name))?;
+    let versions = ctx
+        .pool()
+        .get_versions(&model_name)
+        .iter()
+        .map(|v| v.to_string())
+        .collect();
+    Ok(Json(metadata_response(model_name, versions, &session)))
 }
 
 async fn model_version_metadata(
-    State(state): State<Arc<AppState>>,
+    State(ctx): Ctx,
     AxumPath((model_name, version)): AxumPath<(String, String)>,
-) -> Result<Json<ModelMetadataResponse>, StatusCode> {
-    let v: u32 = version.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    if state.pool.get(&model_name, v).is_none() {
-        return Err(StatusCode::NOT_FOUND);
+) -> Result<Json<ModelMetadataResponse>, ApiError> {
+    let v = parse_version(&version)?;
+    let session = ctx
+        .pool()
+        .get(&model_name, v)
+        .ok_or_else(|| not_found(&model_name))?;
+    Ok(Json(metadata_response(model_name, vec![version], &session)))
+}
+
+async fn model_ready(State(ctx): Ctx, AxumPath(model_name): AxumPath<String>) -> StatusCode {
+    if ctx.pool().get_latest(&model_name).is_some() {
+        StatusCode::OK
+    } else {
+        StatusCode::NOT_FOUND
     }
+}
 
-    let config = load_config_for_model(&state.repo_path, &model_name);
-    let (inputs, outputs) = match config {
-        Some(ref cfg) => {
-            let ins: Vec<TensorMetadataResponse> = cfg
-                .inputs
-                .iter()
-                .map(|t| TensorMetadataResponse {
-                    name: t.name.clone(),
-                    datatype: t.data_type.as_str().to_string(),
-                    shape: t.dims.clone(),
-                })
-                .collect();
-            let outs: Vec<TensorMetadataResponse> = cfg
-                .outputs
-                .iter()
-                .map(|t| TensorMetadataResponse {
-                    name: t.name.clone(),
-                    datatype: t.data_type.as_str().to_string(),
-                    shape: t.dims.clone(),
-                })
-                .collect();
-            (ins, outs)
-        }
-        None => (vec![], vec![]),
-    };
-
-    let platform = config
-        .as_ref()
-        .map(|c| c.platform.clone())
-        .unwrap_or_else(|| "onnxruntime_onnx".to_string());
-
-    Ok(Json(ModelMetadataResponse {
-        name: model_name,
-        versions: vec![version],
-        platform,
-        inputs,
-        outputs,
-    }))
+async fn model_version_ready(
+    State(ctx): Ctx,
+    AxumPath((model_name, version)): AxumPath<(String, String)>,
+) -> StatusCode {
+    match version.parse::<u32>() {
+        Ok(v) if ctx.pool().get(&model_name, v).is_some() => StatusCode::OK,
+        Ok(_) => StatusCode::NOT_FOUND,
+        Err(_) => StatusCode::BAD_REQUEST,
+    }
 }
 
 #[derive(Deserialize)]
@@ -292,70 +323,102 @@ struct InferResponse {
     outputs: Vec<InferOutputResponse>,
 }
 
+/// Output data serialised straight from the typed vectors, avoiding an
+/// intermediate `serde_json::Value` per element.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum OutputData {
+    F32(Vec<f32>),
+    I32(Vec<i32>),
+    I64(Vec<i64>),
+    Str(Vec<String>),
+}
+
 #[derive(Serialize)]
 struct InferOutputResponse {
     name: String,
     shape: Vec<i64>,
-    datatype: String,
-    data: serde_json::Value,
+    datatype: &'static str,
+    data: OutputData,
+}
+
+fn to_output_responses(outputs: InferenceOutput) -> Vec<InferOutputResponse> {
+    outputs
+        .into_iter()
+        .map(|(name, shape, tensor_data)| {
+            let datatype = tensor_data.dtype_str();
+            let data = match tensor_data {
+                TensorData::F32(d) => OutputData::F32(d),
+                TensorData::I32(d) => OutputData::I32(d),
+                TensorData::I64(d) => OutputData::I64(d),
+                TensorData::String(d) => OutputData::Str(d),
+            };
+            InferOutputResponse {
+                name,
+                shape,
+                datatype,
+                data,
+            }
+        })
+        .collect()
 }
 
 async fn infer(
-    State(state): State<Arc<AppState>>,
+    State(ctx): Ctx,
     AxumPath(model_name): AxumPath<String>,
     Json(req): Json<InferRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let session = state
-        .pool
+) -> Result<Json<InferResponse>, ApiError> {
+    let session = ctx
+        .pool()
         .get_latest(&model_name)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    run_inference(state, session, model_name, req).await
+        .ok_or_else(|| not_found(&model_name))?;
+    run_inference(ctx, session, model_name, req).await
 }
 
 async fn infer_version(
-    State(state): State<Arc<AppState>>,
+    State(ctx): Ctx,
     AxumPath((model_name, version)): AxumPath<(String, String)>,
     Json(req): Json<InferRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let v: u32 = version.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let session = state
-        .pool
+) -> Result<Json<InferResponse>, ApiError> {
+    let v = parse_version(&version)?;
+    let session = ctx
+        .pool()
         .get(&model_name, v)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    run_inference(state, session, model_name, req).await
+        .ok_or_else(|| not_found(&model_name))?;
+    run_inference(ctx, session, model_name, req).await
 }
 
 async fn infer_batch(
-    State(state): State<Arc<AppState>>,
+    State(ctx): Ctx,
     AxumPath(model_name): AxumPath<String>,
     Json(req): Json<BatchInferRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let session = state
-        .pool
+) -> Result<Json<BatchInferResponse>, ApiError> {
+    let session = ctx
+        .pool()
         .get_latest(&model_name)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    run_batch_inference(state, session, model_name, req).await
+        .ok_or_else(|| not_found(&model_name))?;
+    run_batch_inference(ctx, session, model_name, req).await
 }
 
 async fn infer_batch_version(
-    State(state): State<Arc<AppState>>,
+    State(ctx): Ctx,
     AxumPath((model_name, version)): AxumPath<(String, String)>,
     Json(req): Json<BatchInferRequest>,
-) -> Result<impl IntoResponse, StatusCode> {
-    let v: u32 = version.parse().map_err(|_| StatusCode::BAD_REQUEST)?;
-    let session = state
-        .pool
+) -> Result<Json<BatchInferResponse>, ApiError> {
+    let v = parse_version(&version)?;
+    let session = ctx
+        .pool()
         .get(&model_name, v)
-        .ok_or(StatusCode::NOT_FOUND)?;
-    run_batch_inference(state, session, model_name, req).await
+        .ok_or_else(|| not_found(&model_name))?;
+    run_batch_inference(ctx, session, model_name, req).await
 }
 
 async fn run_batch_inference(
-    state: Arc<AppState>,
-    session: std::sync::Arc<crate::session::pool::ModelSession>,
+    ctx: Arc<ServeContext>,
+    session: Arc<ModelSession>,
     model_name: String,
     req: BatchInferRequest,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<Json<BatchInferResponse>, ApiError> {
     if req.requests.len() > MAX_BATCH_SIZE {
         tracing::warn!(
             model = %model_name,
@@ -363,354 +426,157 @@ async fn run_batch_inference(
             max = MAX_BATCH_SIZE,
             "batch size exceeds limit"
         );
-        return Err(StatusCode::PAYLOAD_TOO_LARGE);
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            format!("batch size exceeds {MAX_BATCH_SIZE}"),
+        ));
     }
 
     let batch_start = Instant::now();
-    let batch_deadline = batch_start + state.inference_timeout;
-    let mut responses = Vec::with_capacity(req.requests.len());
+    let deadline = batch_start + ctx.inference_timeout;
 
+    // Items run concurrently, bounded by the model's instance count and the
+    // global compute semaphore; each waits for a free instance until the
+    // shared batch deadline.
+    let mut tasks = tokio::task::JoinSet::new();
     for (index, single_req) in req.requests.into_iter().enumerate() {
-        if Instant::now() > batch_deadline {
-            for remaining in index..responses.capacity() {
-                responses.push(BatchInferItem {
-                    index: remaining,
-                    outputs: None,
-                    error: Some("batch deadline exceeded".to_string()),
-                });
-            }
-            break;
-        }
-        let inputs = match parse_http_inputs(&single_req.inputs) {
-            Ok(i) => i,
-            Err(e) => {
-                responses.push(BatchInferItem {
+        let ctx = ctx.clone();
+        let session = session.clone();
+        let model_name = model_name.clone();
+        tasks.spawn(async move {
+            let result = match parse_http_inputs(&single_req.inputs) {
+                Ok(inputs) => serving::execute(
+                    &ctx,
+                    &session,
+                    &model_name,
+                    inputs,
+                    deadline,
+                    Admission::Wait,
+                )
+                .await
+                .map_err(|e| e.to_string()),
+                Err(e) => Err(e.to_string()),
+            };
+            match result {
+                Ok(out) => BatchInferItem {
+                    index,
+                    outputs: Some(to_output_responses(out)),
+                    error: None,
+                },
+                Err(e) => BatchInferItem {
                     index,
                     outputs: None,
-                    error: Some(e.to_string()),
-                });
-                continue;
+                    error: Some(e),
+                },
             }
-        };
-
-        let model_permit = match session.concurrency().clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => {
-                responses.push(BatchInferItem {
-                    index,
-                    outputs: None,
-                    error: Some("model concurrency limit".to_string()),
-                });
-                continue;
-            }
-        };
-
-        let cpu_permit = match tokio::time::timeout(
-            batch_deadline.saturating_duration_since(Instant::now()),
-            state.pool.cpu_semaphore.clone().acquire_owned(),
-        )
-        .await
-        {
-            Ok(Ok(p)) => p,
-            _ => {
-                responses.push(BatchInferItem {
-                    index,
-                    outputs: None,
-                    error: Some("CPU admission failed".to_string()),
-                });
-                continue;
-            }
-        };
-
-        metrics::inc_inflight_compute(&model_name);
-
-        let runner = session.runner.clone();
-        let infer_handle = tokio::task::spawn_blocking(move || {
-            let _model_guard = model_permit;
-            let _cpu_guard = cpu_permit;
-            runner.run(inputs)
         });
-
-        let item_remaining = batch_deadline.saturating_duration_since(Instant::now());
-        tokio::select! {
-            result = infer_handle => {
-                match result {
-                    Ok(Ok(out)) => {
-                        metrics::dec_inflight_compute(&model_name);
-                        let outputs: Vec<InferOutputResponse> = out
-                            .into_iter()
-                            .map(|(name, shape, tensor_data)| {
-                                let dtype = tensor_data.dtype_str().to_string();
-                                let data: serde_json::Value = match tensor_data {
-                                    crate::session::types::TensorData::F32(d) => serde_json::Value::Array(
-                                        d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                                    ),
-                                    crate::session::types::TensorData::I32(d) => serde_json::Value::Array(
-                                        d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                                    ),
-                                    crate::session::types::TensorData::I64(d) => serde_json::Value::Array(
-                                        d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                                    ),
-                                    crate::session::types::TensorData::String(d) => {
-                                        serde_json::Value::Array(
-                                            d.into_iter().map(|v| serde_json::json!(v)).collect(),
-                                        )
-                                    }
-                                };
-                                InferOutputResponse {
-                                    name,
-                                    shape,
-                                    datatype: dtype,
-                                    data,
-                                }
-                            })
-                            .collect();
-                        responses.push(BatchInferItem {
-                            index,
-                            outputs: Some(outputs),
-                            error: None,
-                        });
-                    }
-                    Ok(Err(e)) => {
-                        metrics::dec_inflight_compute(&model_name);
-                        responses.push(BatchInferItem {
-                            index,
-                            outputs: None,
-                            error: Some(e.to_string()),
-                        });
-                    }
-                    Err(e) => {
-                        metrics::dec_inflight_compute(&model_name);
-                        responses.push(BatchInferItem {
-                            index,
-                            outputs: None,
-                            error: Some(format!("spawn error: {e}")),
-                        });
-                    }
-                }
-            }
-            _ = tokio::time::sleep(item_remaining) => {
-                metrics::dec_inflight_compute(&model_name);
-                responses.push(BatchInferItem {
-                    index,
-                    outputs: None,
-                    error: Some("inference timed out".to_string()),
-                });
-            }
-        }
     }
 
-    let total_ms = batch_start.elapsed().as_secs_f64() * 1000.0;
+    let mut responses = Vec::with_capacity(tasks.len());
+    while let Some(item) = tasks.join_next().await {
+        match item {
+            Ok(item) => responses.push(item),
+            Err(e) => tracing::error!(error = %e, "batch item task failed"),
+        }
+    }
+    responses.sort_by_key(|r| r.index);
+
     tracing::info!(
         model = %model_name,
         batch = responses.len(),
-        total_ms = total_ms,
+        total_ms = batch_start.elapsed().as_secs_f64() * 1000.0,
         "batch inference completed"
     );
 
     Ok(Json(BatchInferResponse {
         id: req.id,
-        model_name: model_name.clone(),
+        model_name,
         model_version: session.version.to_string(),
         responses,
     }))
 }
 
 async fn run_inference(
-    state: Arc<AppState>,
-    session: std::sync::Arc<crate::session::pool::ModelSession>,
+    ctx: Arc<ServeContext>,
+    session: Arc<ModelSession>,
     model_name: String,
     req: InferRequest,
-) -> Result<impl IntoResponse, StatusCode> {
+) -> Result<Json<InferResponse>, ApiError> {
     let request_start = Instant::now();
-    let deadline = state.inference_timeout;
-    tracing::debug!(model = %model_name, "inference request received");
-
-    let queue_start = Instant::now();
-    let model_permit = match session.concurrency().clone().try_acquire_owned() {
-        Ok(p) => p,
-        Err(_) => {
-            metrics::record_request(&model_name, "429");
-            return Err(StatusCode::TOO_MANY_REQUESTS);
-        }
-    };
-    metrics::record_queue_wait(&model_name, queue_start.elapsed().as_secs_f64());
+    let deadline = request_start + ctx.inference_timeout;
 
     let inputs = parse_http_inputs(&req.inputs).map_err(|e| {
-        tracing::warn!(error = %e, "bad request");
-        metrics::record_request(&model_name, "400");
-        StatusCode::BAD_REQUEST
+        tracing::warn!(model = %model_name, error = %e, "bad request");
+        crate::metrics::record_request(&model_name, "400");
+        ApiError::new(StatusCode::BAD_REQUEST, e.to_string())
     })?;
 
-    let cpu_permit = match tokio::time::timeout(
-        deadline.saturating_sub(request_start.elapsed()),
-        state.pool.cpu_semaphore.clone().acquire_owned(),
+    let outputs = serving::execute(
+        &ctx,
+        &session,
+        &model_name,
+        inputs,
+        deadline,
+        Admission::Reject,
     )
-    .await
-    {
-        Ok(Ok(p)) => p,
-        Ok(Err(_)) => {
-            metrics::record_request(&model_name, "503");
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-        Err(_) => {
-            tracing::warn!(model = %model_name, "CPU admission timed out");
-            metrics::record_request(&model_name, "503");
-            return Err(StatusCode::SERVICE_UNAVAILABLE);
-        }
-    };
+    .await?;
 
-    metrics::inc_inflight_compute(&model_name);
-
-    let start = Instant::now();
-    let runner = session.runner.clone();
-
-    let infer_handle = tokio::task::spawn_blocking(move || {
-        let _model_guard = model_permit;
-        let _cpu_guard = cpu_permit;
-        runner.run(inputs)
-    });
-
-    let remaining = deadline.saturating_sub(request_start.elapsed());
-    let outputs = tokio::select! {
-        result = infer_handle => {
-            match result {
-                Ok(Ok(out)) => out,
-                Ok(Err(e)) => {
-                    metrics::dec_inflight_compute(&model_name);
-                    tracing::error!(error = %e, "inference failed");
-                    metrics::record_request(&model_name, "500");
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-                Err(e) => {
-                    metrics::dec_inflight_compute(&model_name);
-                    tracing::error!(error = %e, "spawn_blocking failed");
-                    metrics::record_request(&model_name, "500");
-                    return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                }
-            }
-        }
-        _ = tokio::time::sleep(remaining) => {
-            metrics::dec_inflight_compute(&model_name);
-            tracing::warn!(model = %model_name, timeout_ms = deadline.as_millis(), "inference timed out");
-            metrics::record_request(&model_name, "504");
-            return Err(StatusCode::GATEWAY_TIMEOUT);
-        }
-    };
-
-    let latency_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let total_ms = request_start.elapsed().as_secs_f64() * 1000.0;
-    metrics::dec_inflight(&model_name);
-    metrics::record_request(&model_name, "200");
-    metrics::record_latency(&model_name, latency_ms);
-    tracing::info!(model = %model_name, latency_ms = latency_ms, total_ms = total_ms, "inference completed");
-
-    let response_outputs: Vec<InferOutputResponse> = outputs
-        .into_iter()
-        .map(|(name, shape, tensor_data)| {
-            let dtype = tensor_data.dtype_str().to_string();
-            let data: serde_json::Value = match tensor_data {
-                crate::session::types::TensorData::F32(d) => {
-                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
-                }
-                crate::session::types::TensorData::I32(d) => {
-                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
-                }
-                crate::session::types::TensorData::I64(d) => {
-                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
-                }
-                crate::session::types::TensorData::String(d) => {
-                    serde_json::Value::Array(d.into_iter().map(|v| serde_json::json!(v)).collect())
-                }
-            };
-            InferOutputResponse {
-                name,
-                shape,
-                datatype: dtype,
-                data,
-            }
-        })
-        .collect();
+    tracing::info!(
+        model = %model_name,
+        total_ms = request_start.elapsed().as_secs_f64() * 1000.0,
+        "inference completed"
+    );
 
     Ok(Json(InferResponse {
         id: req.id,
-        model_name: model_name.clone(),
+        model_name,
         model_version: session.version.to_string(),
-        outputs: response_outputs,
+        outputs: to_output_responses(outputs),
     }))
 }
 
 fn parse_http_inputs(inputs: &[InferInputRequest]) -> anyhow::Result<Vec<(String, InputTensor)>> {
+    if inputs.len() > MAX_INPUTS {
+        anyhow::bail!("too many inputs: {} (max {MAX_INPUTS})", inputs.len());
+    }
     let mut result = Vec::with_capacity(inputs.len());
 
     for inp in inputs {
-        for &d in &inp.shape {
-            if d <= 0 || d > MAX_DIM_SIZE {
-                anyhow::bail!("dimension out of range: {d} (max {MAX_DIM_SIZE})");
-            }
-        }
-        let shape: Vec<usize> = inp.shape.iter().map(|&d| d as usize).collect();
-        let total: usize = shape
-            .iter()
-            .copied()
-            .try_fold(1usize, |a, b| a.checked_mul(b))
-            .ok_or_else(|| anyhow::anyhow!("shape product overflow: {shape:?}"))?;
-
-        if total > MAX_TENSOR_ELEMENTS {
-            anyhow::bail!("tensor too large: {total} elements (max {MAX_TENSOR_ELEMENTS})");
-        }
+        let (shape, total) = serving::validate_shape(&inp.shape)
+            .map_err(|e| anyhow::anyhow!("input '{}': {e}", inp.name))?;
+        let name = inp.name.as_str();
 
         let tensor = match inp.datatype.as_str() {
             "FP32" | "FLOAT32" => {
-                let data = extract_f64_array(&inp.data, total)?;
-                let floats: Vec<f32> = data
-                    .into_iter()
-                    .map(|v| {
-                        if v.is_infinite() || v.is_nan() {
-                            anyhow::bail!("invalid FP32 value: {v}");
-                        }
-                        Ok(v as f32)
-                    })
-                    .collect::<anyhow::Result<_>>()?;
-                InputTensor::F32(floats, shape)
+                let data = flatten_numbers(&inp.data, total, name, |n| {
+                    let v = n.as_f64().filter(|v| v.is_finite())?;
+                    let f = v as f32;
+                    f.is_finite().then_some(f)
+                })?;
+                InputTensor::F32(data, shape)
             }
             "INT32" => {
-                let data = extract_f64_array(&inp.data, total)?;
-                let ints: Vec<i32> = data
-                    .into_iter()
-                    .map(|v| {
-                        if v < i32::MIN as f64 || v > i32::MAX as f64 || v.fract() != 0.0 {
-                            anyhow::bail!("value {v} out of INT32 range");
-                        }
-                        Ok(v as i32)
-                    })
-                    .collect::<anyhow::Result<_>>()?;
-                InputTensor::I32(ints, shape)
+                let data = flatten_numbers(&inp.data, total, name, |n| {
+                    as_integer(n).and_then(|v| i32::try_from(v).ok())
+                })?;
+                InputTensor::I32(data, shape)
             }
             "INT64" => {
-                let data = extract_f64_array(&inp.data, total)?;
-                let ints: Vec<i64> = data
-                    .into_iter()
-                    .map(|v| {
-                        if v < i64::MIN as f64 || v > i64::MAX as f64 || v.fract() != 0.0 {
-                            anyhow::bail!("value {v} out of INT64 range");
-                        }
-                        Ok(v as i64)
-                    })
-                    .collect::<anyhow::Result<_>>()?;
-                InputTensor::I64(ints, shape)
+                let data = flatten_numbers(&inp.data, total, name, as_integer)?;
+                InputTensor::I64(data, shape)
             }
             "BYTES" | "STRING" => {
-                let strings: Vec<String> = if let Some(arr) = inp.data.as_array() {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(|s| s.to_string()))
-                        .collect()
-                } else {
-                    vec![]
-                };
+                let mut strings = Vec::with_capacity(total.min(1 << 16));
+                collect_strings(&inp.data, 0, &mut strings, name)?;
+                if strings.len() != total {
+                    anyhow::bail!(
+                        "input '{name}': {} strings don't match shape product {total}",
+                        strings.len()
+                    );
+                }
                 InputTensor::String(strings, shape)
             }
-            _ => anyhow::bail!("unsupported datatype: {}", inp.datatype),
+            other => anyhow::bail!("input '{name}': unsupported datatype {other}"),
         };
 
         result.push((inp.name.clone(), tensor));
@@ -719,132 +585,242 @@ fn parse_http_inputs(inputs: &[InferInputRequest]) -> anyhow::Result<Vec<(String
     Ok(result)
 }
 
-fn extract_f64_array(value: &serde_json::Value, expected: usize) -> anyhow::Result<Vec<f64>> {
-    match value {
-        serde_json::Value::Array(arr) => {
-            let flat = flatten_json_array(arr);
-            if flat.len() != expected && expected > 0 {
-                anyhow::bail!(
-                    "data length {} doesn't match shape product {}",
-                    flat.len(),
-                    expected
-                );
-            }
-            Ok(flat)
-        }
-        _ => anyhow::bail!("expected array for tensor data"),
-    }
+/// Integer value of a JSON number; floats are accepted only when integral.
+/// Uses `as_i64` first so INT64 values beyond 2^53 keep full precision.
+fn as_integer(n: &serde_json::Number) -> Option<i64> {
+    n.as_i64().or_else(|| {
+        let f = n.as_f64()?;
+        (f.fract() == 0.0 && f >= i64::MIN as f64 && f < i64::MAX as f64).then_some(f as i64)
+    })
 }
 
-fn flatten_json_array(arr: &[serde_json::Value]) -> Vec<f64> {
-    fn recurse(arr: &[serde_json::Value], depth: usize, out: &mut Vec<f64>) {
-        if depth > MAX_JSON_DEPTH {
-            return;
-        }
-        for v in arr {
-            match v {
-                serde_json::Value::Number(n) => out.push(n.as_f64().unwrap_or(0.0)),
-                serde_json::Value::Array(inner) => recurse(inner, depth + 1, out),
-                _ => {}
+/// Flattens a (possibly nested) JSON number array straight into `Vec<T>`,
+/// rejecting non-numeric or out-of-range elements.
+fn flatten_numbers<T>(
+    value: &serde_json::Value,
+    expected: usize,
+    name: &str,
+    convert: impl Fn(&serde_json::Number) -> Option<T>,
+) -> anyhow::Result<Vec<T>> {
+    fn walk<T>(
+        v: &serde_json::Value,
+        depth: usize,
+        out: &mut Vec<T>,
+        limit: usize,
+        name: &str,
+        convert: &impl Fn(&serde_json::Number) -> Option<T>,
+    ) -> anyhow::Result<()> {
+        match v {
+            serde_json::Value::Number(n) => {
+                if out.len() >= limit {
+                    anyhow::bail!("input '{name}': more data than shape product {limit}");
+                }
+                let value = convert(n)
+                    .ok_or_else(|| anyhow::anyhow!("input '{name}': invalid value {n}"))?;
+                out.push(value);
+                Ok(())
             }
+            serde_json::Value::Array(items) => {
+                if depth >= MAX_JSON_DEPTH {
+                    anyhow::bail!("input '{name}': data nested deeper than {MAX_JSON_DEPTH}");
+                }
+                for item in items {
+                    walk(item, depth + 1, out, limit, name, convert)?;
+                }
+                Ok(())
+            }
+            other => anyhow::bail!("input '{name}': expected number, got {other}"),
         }
     }
-    let mut result = Vec::new();
-    recurse(arr, 0, &mut result);
-    result
+
+    if !value.is_array() {
+        anyhow::bail!("input '{name}': expected array for tensor data");
+    }
+    let mut out = Vec::with_capacity(expected);
+    walk(value, 0, &mut out, expected, name, &convert)?;
+    if out.len() != expected {
+        anyhow::bail!(
+            "input '{name}': data length {} doesn't match shape product {expected}",
+            out.len()
+        );
+    }
+    Ok(out)
+}
+
+fn collect_strings(
+    v: &serde_json::Value,
+    depth: usize,
+    out: &mut Vec<String>,
+    name: &str,
+) -> anyhow::Result<()> {
+    match v {
+        serde_json::Value::String(s) => {
+            out.push(s.clone());
+            Ok(())
+        }
+        serde_json::Value::Array(items) if depth < MAX_JSON_DEPTH => {
+            for item in items {
+                collect_strings(item, depth + 1, out, name)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(_) => {
+            anyhow::bail!("input '{name}': data nested deeper than {MAX_JSON_DEPTH}")
+        }
+        other => anyhow::bail!("input '{name}': expected string, got {other}"),
+    }
 }
 
 #[derive(Deserialize)]
-struct LoadRequest {
+struct VersionRequest {
     #[serde(default)]
     version: Option<u32>,
 }
 
-fn validate_model_path(repo: &Path, name: &str, version: u32) -> Option<PathBuf> {
-    if name.is_empty()
-        || name.contains("..")
-        || name.contains('/')
-        || name.contains('\\')
-        || name.contains('\0')
-    {
-        return None;
+fn require_model_control(ctx: &ServeContext) -> Result<(), ApiError> {
+    if ctx.explicit_model_control {
+        Ok(())
+    } else {
+        Err(ApiError::new(
+            StatusCode::FORBIDDEN,
+            "model control API requires --model-control-mode=explicit",
+        ))
     }
-    let resolved = repo.join(name).join(version.to_string()).join("model.onnx");
-    let canonical = resolved.canonicalize().ok()?;
-    let repo_canonical = repo.canonicalize().ok()?;
-    if !canonical.starts_with(&repo_canonical) {
-        return None;
-    }
-    Some(canonical)
 }
 
 async fn load_model(
-    State(state): State<Arc<AppState>>,
+    State(ctx): Ctx,
     AxumPath(model_name): AxumPath<String>,
-    body: Option<Json<LoadRequest>>,
-) -> StatusCode {
-    let version = body.and_then(|b| b.version).unwrap_or(1);
-    let model_file = match validate_model_path(&state.repo_path, &model_name, version) {
-        Some(p) => p,
-        None => return StatusCode::BAD_REQUEST,
-    };
-
-    match state.pool.load_model(&model_name, version, &model_file, 4) {
-        Ok(_) => {
-            metrics::set_models_count(state.pool.model_count() as i64);
-            StatusCode::OK
-        }
-        Err(e) => {
-            tracing::error!(model = %model_name, version, error = %e, "load failed");
-            StatusCode::INTERNAL_SERVER_ERROR
-        }
+    body: Option<Json<VersionRequest>>,
+) -> Result<StatusCode, ApiError> {
+    require_model_control(&ctx)?;
+    if !is_valid_model_name(&model_name) {
+        return Err(ApiError::new(StatusCode::BAD_REQUEST, "invalid model name"));
     }
-}
-
-#[derive(Deserialize)]
-struct UnloadRequest {
-    #[serde(default)]
-    version: Option<u32>,
+    let version = body.and_then(|b| b.version);
+    ctx.repo
+        .load_one(model_name.clone(), version)
+        .await
+        .map_err(|e| {
+            tracing::error!(model = %model_name, error = %e, "load failed");
+            ApiError::new(StatusCode::BAD_REQUEST, e.to_string())
+        })?;
+    Ok(StatusCode::OK)
 }
 
 async fn unload_model(
-    State(state): State<Arc<AppState>>,
+    State(ctx): Ctx,
     AxumPath(model_name): AxumPath<String>,
-    body: Option<Json<UnloadRequest>>,
-) -> StatusCode {
-    let version = body.and_then(|b| b.version).unwrap_or(1);
-    match state.pool.unload_model(&model_name, version) {
-        Ok(_) => {
-            metrics::set_models_count(state.pool.model_count() as i64);
-            StatusCode::OK
-        }
-        Err(_) => StatusCode::NOT_FOUND,
+    body: Option<Json<VersionRequest>>,
+) -> Result<StatusCode, ApiError> {
+    require_model_control(&ctx)?;
+    let versions = match body.and_then(|b| b.version) {
+        Some(v) => vec![v],
+        None => ctx.pool().get_versions(&model_name),
+    };
+    if versions.is_empty() {
+        return Err(not_found(&model_name));
     }
+    for v in versions {
+        ctx.pool()
+            .unload_model(&model_name, v)
+            .map_err(|e| ApiError::new(StatusCode::NOT_FOUND, e.to_string()))?;
+        crate::metrics::clear_model(&model_name, v);
+    }
+    crate::metrics::set_models_count(ctx.pool().model_count() as i64);
+    Ok(StatusCode::OK)
 }
 
 #[derive(Serialize)]
 struct RepoModelEntry {
     name: String,
-    state: String,
+    state: &'static str,
 }
 
-async fn repository_index(State(state): State<Arc<AppState>>) -> Json<Vec<RepoModelEntry>> {
-    let names = state.pool.all_model_names();
-    let entries: Vec<RepoModelEntry> = names
-        .into_iter()
-        .map(|name| RepoModelEntry {
-            name,
-            state: "READY".to_string(),
-        })
-        .collect();
-    Json(entries)
+async fn repository_index(State(ctx): Ctx) -> Json<Vec<RepoModelEntry>> {
+    Json(
+        ctx.pool()
+            .all_model_names()
+            .into_iter()
+            .map(|name| RepoModelEntry {
+                name,
+                state: "READY",
+            })
+            .collect(),
+    )
 }
 
-fn load_config_for_model(
-    repo_path: &Path,
-    model_name: &str,
-) -> Option<model_repository::ModelConfig> {
-    let config_path = repo_path.join(model_name).join("config.pbtxt");
-    let content = std::fs::read(&config_path).ok()?;
-    crate::model_repository::config_parser::parse_model_config(&content).ok()
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn input(datatype: &str, shape: Vec<i64>, data: serde_json::Value) -> InferInputRequest {
+        InferInputRequest {
+            name: "x".to_string(),
+            shape,
+            datatype: datatype.to_string(),
+            data,
+        }
+    }
+
+    #[test]
+    fn parses_nested_fp32() {
+        let inputs = vec![input(
+            "FP32",
+            vec![2, 2],
+            serde_json::json!([[1, 2.5], [3, 4]]),
+        )];
+        let parsed = parse_http_inputs(&inputs).unwrap();
+        match &parsed[0].1 {
+            InputTensor::F32(d, s) => {
+                assert_eq!(d, &vec![1.0, 2.5, 3.0, 4.0]);
+                assert_eq!(s, &vec![2, 2]);
+            }
+            _ => panic!("expected FP32"),
+        }
+    }
+
+    #[test]
+    fn int64_keeps_precision() {
+        let big = 9_007_199_254_740_993i64; // 2^53 + 1
+        let inputs = vec![input("INT64", vec![1], serde_json::json!([big]))];
+        match &parse_http_inputs(&inputs).unwrap()[0].1 {
+            InputTensor::I64(d, _) => assert_eq!(d[0], big),
+            _ => panic!("expected INT64"),
+        }
+    }
+
+    #[test]
+    fn rejects_bad_data() {
+        let cases = vec![
+            input("FP32", vec![2], serde_json::json!([1.0])),
+            input("FP32", vec![1], serde_json::json!([1.0, 2.0])),
+            input("FP32", vec![1], serde_json::json!(["a"])),
+            input("FP32", vec![1], serde_json::json!([1e300])),
+            input("INT32", vec![1], serde_json::json!([1.5])),
+            input("INT32", vec![1], serde_json::json!([3_000_000_000i64])),
+            input("BYTES", vec![2], serde_json::json!(["a"])),
+            input("BYTES", vec![1], serde_json::json!([1])),
+            input("FP32", vec![-1], serde_json::json!([1.0])),
+            input("FP16", vec![1], serde_json::json!([1.0])),
+            input("FP32", vec![1], serde_json::json!([[[[[[[[[[1.0]]]]]]]]]])),
+        ];
+        for c in cases {
+            assert!(parse_http_inputs(&[c]).is_err());
+        }
+    }
+
+    #[test]
+    fn output_serialization_is_typed() {
+        let out = to_output_responses(vec![(
+            "y".to_string(),
+            vec![2],
+            TensorData::I64(vec![1, 2]),
+        )]);
+        let json = serde_json::to_value(&out).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!([{"name": "y", "shape": [2], "datatype": "INT64", "data": [1, 2]}])
+        );
+    }
 }
