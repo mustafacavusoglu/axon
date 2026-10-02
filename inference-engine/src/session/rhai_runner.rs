@@ -1,7 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use parking_lot::Mutex as PLMutex;
 use rhai::{Dynamic, Engine, Scope, AST};
 use tokenizers::Tokenizer;
 use tokio::sync::Semaphore;
@@ -110,8 +109,6 @@ impl RhaiRunner {
         let script_content = std::fs::read_to_string(script_path).map_err(|e| {
             anyhow::anyhow!("failed to read script {}: {}", script_path.display(), e)
         })?;
-
-        let _script_dir = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
 
         let mut engine = Engine::new();
         engine.set_max_operations(1_000_000);
@@ -267,22 +264,24 @@ impl RhaiRunner {
 
         let script_dir3 = script_path.parent().unwrap_or(Path::new(".")).to_path_buf();
         let tokenizer_path = script_dir3.join("tokenizer.json");
-        let tokenizer: Arc<PLMutex<Option<Tokenizer>>> = if tokenizer_path.exists() {
+        // `Tokenizer::encode` takes `&self` and is thread-safe, so no lock:
+        // concurrent requests tokenize in parallel.
+        let tokenizer: Arc<Option<Tokenizer>> = if tokenizer_path.exists() {
             match Tokenizer::from_file(&tokenizer_path) {
                 Ok(t) => {
                     tracing::info!("loaded tokenizer.json from {}", tokenizer_path.display());
-                    Arc::new(PLMutex::new(Some(t)))
+                    Arc::new(Some(t))
                 }
                 Err(e) => {
                     tracing::warn!(
                         "failed to load tokenizer.json from {}: {e}",
                         tokenizer_path.display()
                     );
-                    Arc::new(PLMutex::new(None))
+                    Arc::new(None)
                 }
             }
         } else {
-            Arc::new(PLMutex::new(None))
+            Arc::new(None)
         };
 
         super::rhai_builtins::register_all(&mut engine, tokenizer.clone());
@@ -290,8 +289,8 @@ impl RhaiRunner {
         engine.register_fn(
             "tokenize",
             move |text: &str| -> Result<rhai::Map, Box<rhai::EvalAltResult>> {
-                let tok = tokenizer.lock();
-                let tokenizer = tok
+                let tokenizer = tokenizer
+                    .as_ref()
                     .as_ref()
                     .ok_or_else(|| "tokenizer.json not loaded".to_string())?;
                 let encoding = tokenizer
