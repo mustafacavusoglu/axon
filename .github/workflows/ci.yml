@@ -253,16 +253,15 @@ jobs:
           VERSION=$(grep '^version' inference-engine/Cargo.toml | head -1 | sed 's/.*"\(.*\)"/\1/')
           echo "version=$VERSION" >> $GITHUB_OUTPUT
 
-      - name: Create and push multi-arch manifest
+      # ARM64 is disabled in CI: `<version>` and `latest` point to the
+      # amd64 image only.
+      - name: Tag version and latest
         run: |
           VERSION="${{ steps.ver.outputs.version }}"
           IMAGE="${{ env.IMAGE_NAME }}"
           docker buildx imagetools create -t ${IMAGE}:${VERSION} \
-            ${IMAGE}:${VERSION}-amd64 \
-            ${IMAGE}:${VERSION}-arm64
-          docker buildx imagetools create -t ${IMAGE}:latest \
-            ${IMAGE}:${VERSION}-amd64 \
-            ${IMAGE}:${VERSION}-arm64
+            -t ${IMAGE}:latest \
+            ${IMAGE}:${VERSION}-amd64
 
   release-build:
     needs: [changes, test]
