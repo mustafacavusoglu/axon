@@ -1,8 +1,9 @@
 #!/bin/sh
 set -e
 
-export OMP_NUM_THREADS=1
-export OMP_WAIT_POLICY=PASSIVE
+# Defaults only — values passed with `docker run -e` win.
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
+export OMP_WAIT_POLICY="${OMP_WAIT_POLICY:-PASSIVE}"
 
 # WSL2 workaround: copy bind-mounted models to local fs
 # WSL2's 9p filesystem is ~100x slower for random reads than native ext4.
@@ -13,7 +14,7 @@ MODEL_DST="${MODEL_DST:-/models}"
 
 if [ -d "$MODEL_SRC" ] && [ "$(ls -A "$MODEL_SRC" 2>/dev/null)" ]; then
     echo "axon: copying models from $MODEL_SRC to $MODEL_DST (WSL2/9p workaround)..."
-    cp -r "$MODEL_SRC"/* "$MODEL_DST"/
+    cp -r "$MODEL_SRC"/. "$MODEL_DST"/
     echo "axon: models copied, starting server..."
     echo "=== /models contents ==="
     find /models -type f -o -type d | sort

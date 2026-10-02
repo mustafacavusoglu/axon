@@ -1,3 +1,18 @@
+# syntax=docker/dockerfile:1
+#
+# Targets:
+#   runtime      (default) CPU image, linux/amd64 + linux/arm64
+#   runtime-gpu  CUDA 12 / cuDNN 9 image, linux/amd64 (optional TensorRT 10)
+#
+#   docker build -f Dockerfile.inference-engine -t mustafa12/axon:dev .
+#   docker build -f Dockerfile.inference-engine --target runtime-gpu -t mustafa12/axon:dev-gpu .
+#
+# The axon-server binary is identical for both: ONNX Runtime is loaded
+# dynamically, so only the bundled libonnxruntime differs.
+
+ARG ONNX_VERSION=1.24.2
+
+# ───────────────────────────── build ─────────────────────────────
 FROM rust:1.88-slim-bookworm AS builder
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -14,34 +29,102 @@ RUN mkdir src && echo "fn main() {}" > src/main.rs && cargo build --release 2>/d
 
 COPY inference-engine/src/ ./src/
 
-RUN cargo fetch
+RUN cargo fetch --locked
 RUN find /usr/local/cargo/registry/src -path '*/ort-2.0.0-rc.12/src/value/type.rs' \
     -exec sh -c 'sed -i "s/todo!();/return Err(crate::Error::new_with_code(crate::ErrorCode::GenericFailure, \"Map type not supported\"));/" "$1" && echo "patched $1"' _ {} \;
-RUN rm -rf target/release/.fingerprint/ort* target/release/deps/*ort* target/release/libonnx* && cargo build --release --locked
+RUN rm -rf target/release/.fingerprint/ort* target/release/deps/*ort* target/release/libonnx* \
+    && cargo build --release --locked \
+    && strip target/release/axon-server
 
+# ─────────────────── ONNX Runtime (checksum-verified) ───────────────────
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS ort-fetch
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+ARG ONNX_VERSION
+ARG ORT_SHA256_X64=43725474ba5663642e17684717946693850e2005efbd724ac72da278fead25e6
+ARG ORT_SHA256_AARCH64=6715b3d19965a2a6981e78ed4ba24f17a8c30d2d26420dbed10aac7ceca0085e
+ARG ORT_SHA256_X64_GPU=bcb42da041f42192e5579de175f7410313c114740a611e230afe9d79be65cc49
+
+FROM ort-fetch AS ort-cpu
+RUN set -eu; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) ARCH=x64; SHA="${ORT_SHA256_X64}" ;; \
+      arm64) ARCH=aarch64; SHA="${ORT_SHA256_AARCH64}" ;; \
+      *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ARCH}-${ONNX_VERSION}.tgz" -o /tmp/onnx.tgz; \
+    echo "${SHA}  /tmp/onnx.tgz" | sha256sum -c -; \
+    tar xzf /tmp/onnx.tgz -C /tmp; \
+    mkdir -p /ort; \
+    cp -a /tmp/onnxruntime-linux-${ARCH}-${ONNX_VERSION}/lib/libonnxruntime.so* /ort/
+
+FROM ort-fetch AS ort-gpu
+RUN set -eu; \
+    [ "$(dpkg --print-architecture)" = "amd64" ] || { echo "GPU image is amd64-only" >&2; exit 1; }; \
+    curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-x64-gpu-${ONNX_VERSION}.tgz" -o /tmp/onnx.tgz; \
+    echo "${ORT_SHA256_X64_GPU}  /tmp/onnx.tgz" | sha256sum -c -; \
+    tar xzf /tmp/onnx.tgz -C /tmp; \
+    mkdir -p /ort; \
+    cp -a /tmp/onnxruntime-linux-x64-gpu-${ONNX_VERSION}/lib/*.so* /ort/
+
+# ───────────────────────────── GPU runtime ─────────────────────────────
+# CUDA 12.8 + cuDNN 9 match the ONNX Runtime 1.24 GPU build. Ubuntu 24.04
+# (glibc 2.39) runs the bookworm-built binary (glibc 2.36).
+FROM nvidia/cuda:12.8.1-cudnn-runtime-ubuntu24.04 AS runtime-gpu
+LABEL org.opencontainers.image.title="axon-gpu" \
+      org.opencontainers.image.source="https://github.com/mustafacavusoglu/axon" \
+      maintainer="mustafa12"
+
+# Set INSTALL_TENSORRT=true to add TensorRT 10 (~2 GB) for --device=tensorrt.
+ARG INSTALL_TENSORRT=false
+ARG TENSORRT_VERSION=10.9.0.34-1+cuda12.8
+RUN set -eu; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libgomp1; \
+    if [ "${INSTALL_TENSORRT}" = "true" ]; then \
+      apt-get install -y --no-install-recommends \
+        libnvinfer10=${TENSORRT_VERSION} \
+        libnvinfer-plugin10=${TENSORRT_VERSION} \
+        libnvonnxparsers10=${TENSORRT_VERSION}; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=ort-gpu /ort/ /usr/local/lib/
+COPY --from=builder /build/target/release/axon-server /usr/local/bin/axon-server
+COPY docker-entrypoint.sh /usr/local/bin/
+
+ENV LD_LIBRARY_PATH=/usr/local/lib \
+    AXON_DEVICE=auto \
+    NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility
+
+RUN groupadd --gid 10001 axon && \
+    useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin axon && \
+    mkdir -p /models /tmp/logs/axon && \
+    chown -R 10001:10001 /models /tmp/logs/axon
+
+# Numeric UID so Kubernetes can verify runAsNonRoot.
+USER 10001:10001
+
+VOLUME ["/models"]
+EXPOSE 8000 8001 8002
+
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["--model-repository=/models", "--http-port=8000", "--grpc-port=8001", "--metrics-port=8002"]
+
+# ───────────────────────────── CPU runtime (default) ─────────────────────────────
 FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS runtime
 LABEL org.opencontainers.image.title="axon" \
       org.opencontainers.image.source="https://github.com/mustafacavusoglu/axon" \
       maintainer="mustafa12"
 
+# No curl/ca-certificates in the final image: ONNX Runtime is fetched and
+# verified in the ort-cpu stage.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates \
-    curl \
     libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
-ARG ONNX_VERSION=1.24.2
-ARG TARGETARCH=arm64
-RUN case "$(dpkg --print-architecture)" in \
-    amd64) ARCH=x64 ;; \
-    arm64) ARCH=aarch64 ;; \
-    *) echo "Unsupported architecture: $(dpkg --print-architecture)" >&2 && exit 1 ;; \
-    esac && \
-    curl -fsSL "https://github.com/microsoft/onnxruntime/releases/download/v${ONNX_VERSION}/onnxruntime-linux-${ARCH}-${ONNX_VERSION}.tgz" -o /tmp/onnx.tgz && \
-    tar xzf /tmp/onnx.tgz -C /opt && \
-    cp /opt/onnxruntime-linux-${ARCH}-${ONNX_VERSION}/lib/libonnxruntime.so* /usr/local/lib/ && \
-    rm -rf /opt/onnxruntime-linux-* /tmp/onnx.tgz
-
+COPY --from=ort-cpu /ort/ /usr/local/lib/
 COPY --from=builder /build/target/release/axon-server /usr/local/bin/axon-server
 COPY docker-entrypoint.sh /usr/local/bin/
 
@@ -53,11 +136,13 @@ RUN SERVER_MACHINE="$(od -An -tx2 -j18 -N2 /usr/local/bin/axon-server | tr -d ' 
 
 ENV LD_LIBRARY_PATH=/usr/local/lib
 
-RUN useradd --create-home --shell /bin/bash axon && \
+RUN groupadd --gid 10001 axon && \
+    useradd --uid 10001 --gid 10001 --create-home --shell /usr/sbin/nologin axon && \
     mkdir -p /models /tmp/logs/axon && \
-    chown -R axon:axon /models /tmp/logs/axon
+    chown -R 10001:10001 /models /tmp/logs/axon
 
-USER axon
+# Numeric UID so Kubernetes can verify runAsNonRoot.
+USER 10001:10001
 
 VOLUME ["/models"]
 EXPOSE 8000 8001 8002

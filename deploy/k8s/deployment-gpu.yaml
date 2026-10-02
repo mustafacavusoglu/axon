@@ -1,18 +1,20 @@
+# GPU variant of deployment.yaml. Requires the NVIDIA device plugin
+# (or GPU Operator) so that `nvidia.com/gpu` is schedulable.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: inference-server
+  name: inference-server-gpu
   labels:
-    app: inference-server
+    app: inference-server-gpu
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app: inference-server
+      app: inference-server-gpu
   template:
     metadata:
       labels:
-        app: inference-server
+        app: inference-server-gpu
     spec:
       securityContext:
         runAsUser: 10001
@@ -20,7 +22,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: axon-server
-          image: mustafa12/axon:0.4.0
+          image: mustafa12/axon:0.4.0-gpu
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
@@ -46,6 +48,9 @@ spec:
             - "--grpc-port=8001"
             - "--metrics-port=8002"
             - "--num-threads=4"
+            # KIND_AUTO models run on the GPU; KIND_CPU models stay on CPU.
+            # Use --device=auto to fall back to CPU instead of failing.
+            - "--device=cuda"
           env:
             # Optional: require `Authorization: Bearer <key>` on all
             # non-health endpoints. Create with:
@@ -58,11 +63,12 @@ spec:
                   optional: true
           resources:
             requests:
-              cpu: "500m"
-              memory: "512Mi"
-            limits:
-              cpu: "2000m"
+              cpu: "1000m"
               memory: "2Gi"
+            limits:
+              cpu: "4000m"
+              memory: "8Gi"
+              nvidia.com/gpu: 1
           startupProbe:
             httpGet:
               path: /v2/health/ready
@@ -88,6 +94,11 @@ spec:
             # readOnlyRootFilesystem: logs (/tmp/logs/axon) need a writable /tmp.
             - name: tmp
               mountPath: /tmp
+      # Schedule onto GPU nodes (adjust to your cluster's labels/taints).
+      tolerations:
+        - key: nvidia.com/gpu
+          operator: Exists
+          effect: NoSchedule
       volumes:
         - name: models
           persistentVolumeClaim:
@@ -95,3 +106,24 @@ spec:
         - name: tmp
           emptyDir:
             sizeLimit: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: inference-server-gpu
+  labels:
+    app: inference-server-gpu
+spec:
+  type: ClusterIP
+  selector:
+    app: inference-server-gpu
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: grpc
+      port: 8001
+      targetPort: 8001
+    - name: metrics
+      port: 8002
+      targetPort: 8002
