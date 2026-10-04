@@ -12,6 +12,7 @@ Single-binary, Triton-compatible model serving on CPU and NVIDIA GPUs (CUDA / Te
 
 - **KServe v2 API** — HTTP + gRPC, full model management
 - **GPU Inference** — CUDA & TensorRT execution providers, per-model `KIND_GPU`/`KIND_CPU` placement, multi-GPU round-robin
+- **Web Console** — built-in UI at `/ui` (`--ui`): model list with device/platform, schema viewer and an inference playground
 - **API Key Auth** — optional Bearer token on HTTP + gRPC (health probes stay open)
 - **Ensemble Pipelines** — Declarative multi-model chaining via config
 - **BLS (Rhai Scripting)** — Custom pre/post processing logic
@@ -100,6 +101,20 @@ docker build -f Dockerfile.inference-engine --target runtime-gpu \
 
 ---
 
+## Web Console
+
+```bash
+axon-server --model-repository=/models --ui
+# open http://localhost:8000/ui
+```
+
+A single-page console embedded in the binary (no extra port, container or Node toolchain):
+- model list with platform, version and device (`cpu` / `cuda:0`), filterable, refreshed every 10 s
+- input/output schema of each model version
+- inference playground: the form is generated from the model config; enter data as flat or nested JSON, see the result and round-trip time, or copy the request as `curl`
+
+The page itself is public, but every API call it makes needs the key when `--api-key` is set: type it in the top-right box (kept in `sessionStorage` only, cleared when the tab closes). The console is read-only apart from running inference. Assets are served with a strict Content-Security-Policy.
+
 ## GPU Inference
 
 ```bash
@@ -152,6 +167,7 @@ instance_group [
 | `--trt-cache-dir` | — | TensorRT engine/timing cache directory |
 | `--intra-op-threads` | `1` | ONNX Runtime threads per instance |
 | `--model-load-timeout-secs` | auto | 10 s CPU, 120 s CUDA, 900 s TensorRT |
+| `--ui` | off | Serve the web console at `/ui` (env `AXON_UI`) |
 | `--api-key` | — | Require `Authorization: Bearer <key>` (env `AXON_API_KEY`) |
 | `--log-level` | `info` | Log level: trace, debug, info, warn, error |
 | `--log-dir` | `/tmp/logs/axon` | Log directory (JSON, daily rotation) |

@@ -159,9 +159,7 @@ impl GrpcInferenceService for KfsService {
                 .map(|v| v.to_string())
                 .collect(),
             name: req.name,
-            platform: cfg
-                .map(|c| c.platform.clone())
-                .unwrap_or_else(|| "onnxruntime_onnx".to_string()),
+            platform: session.platform(),
             inputs: cfg.map(|c| to_meta(&c.inputs)).unwrap_or_default(),
             outputs: cfg.map(|c| to_meta(&c.outputs)).unwrap_or_default(),
         }))

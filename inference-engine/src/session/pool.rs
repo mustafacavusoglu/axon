@@ -26,6 +26,16 @@ pub struct ModelSession {
 }
 
 impl ModelSession {
+    /// Platform as reported by the API (`onnxruntime_onnx`, `script`,
+    /// `ensemble`): the config value, or the runner's kind without a config.
+    pub fn platform(&self) -> String {
+        match (&self.config, self.runner.platform_name()) {
+            (Some(c), _) => c.platform.clone(),
+            (None, "onnxruntime") => "onnxruntime_onnx".to_string(),
+            (None, other) => other.to_string(),
+        }
+    }
+
     pub fn concurrency(&self) -> &Arc<Semaphore> {
         self.runner.concurrency_semaphore()
     }
@@ -186,6 +196,13 @@ mod tests {
         let new = pool.get("m", 1).unwrap();
         assert!(!Arc::ptr_eq(&old, &new));
         assert_eq!(pool.model_count(), 1);
+    }
+
+    #[test]
+    fn platform_without_config_uses_runner_kind() {
+        let pool = SessionPool::new(1).unwrap();
+        let s = pool.insert("m", 1, dummy_runner(), None, None);
+        assert_eq!(s.platform(), "noop");
     }
 
     #[test]

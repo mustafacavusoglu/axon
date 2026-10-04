@@ -20,7 +20,7 @@ spec:
         fsGroup: 10001
       containers:
         - name: axon-server
-          image: mustafa12/axon:0.4.0
+          image: mustafa12/axon:0.4.1
           imagePullPolicy: IfNotPresent
           securityContext:
             runAsNonRoot: true
