@@ -162,7 +162,7 @@ struct ModelEntry {
     name: String,
     version: String,
     state: String,
-    platform: &'static str,
+    platform: String,
     /// Where the model executes (`cpu`, `cuda:0`, ...).
     device: String,
 }
@@ -178,8 +178,8 @@ async fn list_models(State(ctx): Ctx) -> Json<Vec<ModelEntry>> {
                 ModelEntry {
                     platform: session
                         .as_ref()
-                        .map(|s| s.runner.platform_name())
-                        .unwrap_or("unknown"),
+                        .map(|s| s.platform())
+                        .unwrap_or_else(|| "unknown".to_string()),
                     device: session
                         .as_ref()
                         .map(|s| s.runner.device_label())
@@ -229,9 +229,7 @@ fn metadata_response(
     ModelMetadataResponse {
         name,
         versions,
-        platform: cfg
-            .map(|c| c.platform.clone())
-            .unwrap_or_else(|| "onnxruntime_onnx".to_string()),
+        platform: session.platform(),
         device: session.runner.device_label(),
         inputs: cfg.map(|c| tensor_metadata(&c.inputs)).unwrap_or_default(),
         outputs: cfg.map(|c| tensor_metadata(&c.outputs)).unwrap_or_default(),
