@@ -5,6 +5,7 @@ mod metrics;
 mod model_repository;
 mod serving;
 mod session;
+mod ui;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -262,7 +263,16 @@ fn main() -> anyhow::Result<()> {
             inference_timeout: Duration::from_millis(config.inference_timeout_ms),
             api_key: config.api_key().map(Arc::from),
             explicit_model_control: config.model_control_mode == "explicit",
+            ui_enabled: config.ui,
         });
+        if ctx.ui_enabled {
+            tracing::info!(
+                target: "axon::console",
+                "web UI enabled at http://{}:{}/ui",
+                config.host,
+                config.http_port
+            );
+        }
         if ctx.api_key.is_none() {
             tracing::warn!(
                 target: "axon::console",

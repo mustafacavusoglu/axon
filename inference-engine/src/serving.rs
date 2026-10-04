@@ -22,6 +22,8 @@ pub struct ServeContext {
     pub api_key: Option<Arc<str>>,
     /// Load/unload API enabled (`--model-control-mode=explicit`).
     pub explicit_model_control: bool,
+    /// Serve the built-in web UI at `/ui` (`--ui`).
+    pub ui_enabled: bool,
 }
 
 impl ServeContext {

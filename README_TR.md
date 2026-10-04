@@ -12,6 +12,7 @@ Tek binary, Triton uyumlu; CPU ve NVIDIA GPU (CUDA / TensorRT) üzerinde model s
 
 - **KServe v2 API** — HTTP + gRPC, tam model yönetimi
 - **GPU Inference** — CUDA ve TensorRT execution provider, model bazında `KIND_GPU`/`KIND_CPU` yerleşimi, çoklu GPU round-robin
+- **Web Konsolu** — `/ui` adresinde gömülü arayüz (`--ui`): cihaz/platform bilgili model listesi, şema görüntüleyici ve inference deneme alanı
 - **API Key Doğrulama** — HTTP + gRPC için opsiyonel Bearer token (health endpoint'leri açık kalır)
 - **Ensemble Pipeline** — Config ile declarative çok-model zincirleme
 - **BLS (Rhai Scripting)** — Özel pre/post processing mantığı
@@ -100,6 +101,20 @@ docker build -f Dockerfile.inference-engine --target runtime-gpu \
 
 ---
 
+## Web Konsolu
+
+```bash
+axon-server --model-repository=/models --ui
+# http://localhost:8000/ui adresini açın
+```
+
+Binary'nin içine gömülü tek sayfalık konsol (ek port, konteyner veya Node gerektirmez):
+- platform, versiyon ve cihaz (`cpu` / `cuda:0`) bilgisiyle filtrelenebilir model listesi; 10 sn'de bir yenilenir
+- her model versiyonunun input/output şeması
+- inference deneme alanı: form model config'inden otomatik üretilir; veriyi düz ya da iç içe JSON olarak girin, sonucu ve süreyi görün veya isteği `curl` olarak kopyalayın
+
+Sayfanın kendisi herkese açıktır; ancak `--api-key` ayarlıysa arayüzün yaptığı her API çağrısı için anahtar gerekir: sağ üstteki kutuya yazın (yalnızca `sessionStorage`'da tutulur, sekme kapanınca silinir). Konsol, inference çalıştırmak dışında salt okunurdur. Dosyalar sıkı bir Content-Security-Policy ile sunulur.
+
 ## GPU Inference
 
 ```bash
@@ -152,6 +167,7 @@ instance_group [
 | `--trt-cache-dir` | — | TensorRT engine/timing cache dizini |
 | `--intra-op-threads` | `1` | Instance başına ONNX Runtime thread sayısı |
 | `--model-load-timeout-secs` | otomatik | CPU 10 sn, CUDA 120 sn, TensorRT 900 sn |
+| `--ui` | kapalı | `/ui` adresinde web konsolunu açar (env `AXON_UI`) |
 | `--api-key` | — | `Authorization: Bearer <key>` zorunlu kılar (env `AXON_API_KEY`) |
 | `--log-level` | `info` | Log seviyesi: trace, debug, info, warn, error |
 | `--log-dir` | `/tmp/logs/axon` | Log dizini (JSON, günlük rotation) |

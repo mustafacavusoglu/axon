@@ -102,6 +102,13 @@ pub struct ServerConfig {
 
     #[arg(
         long,
+        env = "AXON_UI",
+        help = "Serve the built-in web UI (model list + inference playground) at /ui"
+    )]
+    pub ui: bool,
+
+    #[arg(
+        long,
         env = "AXON_API_KEY",
         hide_env_values = true,
         help = "Require 'Authorization: Bearer <key>' on all non-health endpoints"
@@ -186,5 +193,12 @@ mod tests {
         let cfg = ServerConfig::try_parse_from(["axon-server"]).unwrap();
         assert_eq!(cfg.device, DevicePreference::Cpu);
         assert!(cfg.api_key().is_none());
+        assert!(!cfg.ui);
+    }
+
+    #[test]
+    fn ui_flag() {
+        let cfg = ServerConfig::try_parse_from(["axon-server", "--ui"]).unwrap();
+        assert!(cfg.ui);
     }
 }

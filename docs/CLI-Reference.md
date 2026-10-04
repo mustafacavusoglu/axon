@@ -145,6 +145,19 @@ curl -H "Authorization: Bearer change-me" http://localhost:8000/v2/models
 
 ---
 
+## Web Console
+
+### `--ui`
+**Default:** off · **Env:** `AXON_UI`
+
+Serves the built-in web console at `/ui` on the HTTP port. The static assets are public; API calls made by the page use the key typed into the console when `--api-key` is set.
+
+```bash
+axon-server --ui --api-key=change-me
+```
+
+---
+
 ## Logging
 
 ### `--log-level <LEVEL>`

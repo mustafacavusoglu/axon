@@ -83,10 +83,19 @@ pub async fn serve(
         .route_layer(middleware::from_fn_with_state(ctx.clone(), require_api_key));
 
     // Health endpoints stay unauthenticated for orchestrator probes.
-    let app = Router::new()
+    let mut app = Router::new()
         .route("/v2/health/live", get(health_live))
         .route("/v2/health/ready", get(health_ready))
-        .merge(protected)
+        .merge(protected);
+
+    // The UI assets are static and secret-free, so they are served without
+    // the API key (a browser navigation cannot send a Bearer header); every
+    // API call the UI makes carries the key the user typed in.
+    if ctx.ui_enabled {
+        app = app.merge(crate::ui::router());
+    }
+
+    let app = app
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .with_state(ctx);
 
@@ -153,6 +162,9 @@ struct ModelEntry {
     name: String,
     version: String,
     state: String,
+    platform: &'static str,
+    /// Where the model executes (`cpu`, `cuda:0`, ...).
+    device: String,
 }
 
 async fn list_models(State(ctx): Ctx) -> Json<Vec<ModelEntry>> {
@@ -161,10 +173,21 @@ async fn list_models(State(ctx): Ctx) -> Json<Vec<ModelEntry>> {
     Json(
         models
             .into_iter()
-            .map(|(name, version, st)| ModelEntry {
-                name,
-                version: version.to_string(),
-                state: format!("{st:?}"),
+            .map(|(name, version, st)| {
+                let session = ctx.pool().get(&name, version);
+                ModelEntry {
+                    platform: session
+                        .as_ref()
+                        .map(|s| s.runner.platform_name())
+                        .unwrap_or("unknown"),
+                    device: session
+                        .as_ref()
+                        .map(|s| s.runner.device_label())
+                        .unwrap_or_default(),
+                    name,
+                    version: version.to_string(),
+                    state: format!("{st:?}"),
+                }
             })
             .collect(),
     )
